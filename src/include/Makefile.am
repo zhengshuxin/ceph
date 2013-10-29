@@ -15,7 +15,8 @@ rados_include_DATA = \
 	$(srcdir)/include/rados/librados.hpp \
 	$(srcdir)/include/buffer.h \
 	$(srcdir)/include/page.h \
-	$(srcdir)/include/crc32c.h
+	$(srcdir)/include/crc32c.h \
+	$(srcdir)/include/memory.h
 
 noinst_HEADERS += \
 	include/Context.h \
