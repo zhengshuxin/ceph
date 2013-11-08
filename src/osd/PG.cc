@@ -1005,10 +1005,6 @@ bool PG::choose_acting(int& newest_update_osd)
     return false;
   }
 
-  // For now we only backfill 1 at a time as before
-  if (!backfill.empty())
-    backfill.resize(1);
-
   // This might cause a problem if min_size is large
   // and we need to backfill more than 1 osd.  Older
   // code would only include 1 backfill osd and now we
@@ -4712,8 +4708,8 @@ ostream& operator<<(ostream& out, const PG& pg)
     }
   }
 
-  if (pg.get_backfill_target() >= 0)
-    out << " bft=" << pg.get_backfill_target();
+  if (!pg.backfill_targets.empty())
+    out << " bft=" << pg.backfill_targets;
 
   if (pg.last_complete_ondisk != pg.info.last_complete)
     out << " lcod " << pg.last_complete_ondisk;
@@ -5449,27 +5445,44 @@ void PG::RecoveryState::Backfilling::exit()
 
 PG::RecoveryState::WaitRemoteBackfillReserved::WaitRemoteBackfillReserved(my_context ctx)
   : my_base(ctx),
-    NamedState(context< RecoveryMachine >().pg->cct, "Started/Primary/Active/WaitRemoteBackfillReserved")
+    NamedState(context< RecoveryMachine >().pg->cct, "Started/Primary/Active/WaitRemoteBackfillReserved"),
+    backfill_osd_it(context< Active >().sorted_backfill_set.begin())
 {
   context< RecoveryMachine >().log_enter(state_name);
   PG *pg = context< RecoveryMachine >().pg;
+  pg->state_clear(PG_STATE_BACKFILL_TOOFULL);
   pg->state_set(PG_STATE_BACKFILL_WAIT);
-  ConnectionRef con = pg->osd->get_con_osd_cluster(
-    pg->get_backfill_target(), pg->get_osdmap()->get_epoch());
-  if (con) {
-    if (con->has_feature(CEPH_FEATURE_BACKFILL_RESERVATION)) {
-      unsigned priority = pg->is_degraded() ? OSDService::BACKFILL_HIGH
+  post_event(RemoteBackfillReserved());
+}
+
+boost::statechart::result
+PG::RecoveryState::WaitRemoteBackfillReserved::react(const RemoteBackfillReserved &evt)
+{
+  PG *pg = context< RecoveryMachine >().pg;
+
+  if (backfill_osd_it != context< Active >().sorted_backfill_set.end()) {
+    //The primary never backfills itself
+    assert(*backfill_osd_it != pg->osd->whoami);
+    ConnectionRef con = pg->osd->get_con_osd_cluster(*backfill_osd_it, pg->get_osdmap()->get_epoch());
+    if (con) {
+      if (con->has_feature(CEPH_FEATURE_BACKFILL_RESERVATION)) {
+        unsigned priority = pg->is_degraded() ? OSDService::BACKFILL_HIGH
 	  : OSDService::BACKFILL_LOW;
-      pg->osd->send_message_osd_cluster(
-        new MBackfillReserve(
+        pg->osd->send_message_osd_cluster(
+          new MBackfillReserve(
 	  MBackfillReserve::REQUEST,
 	  pg->info.pgid,
 	  pg->get_osdmap()->get_epoch(), priority),
 	con.get());
-    } else {
-      post_event(RemoteBackfillReserved());
+      } else {
+        post_event(RemoteBackfillReserved());
+      }
     }
+    ++backfill_osd_it;
+  } else {
+    post_event(AllBackfillsReserved());
   }
+  return discard_event();
 }
 
 void PG::RecoveryState::WaitRemoteBackfillReserved::exit()
@@ -5478,14 +5491,6 @@ void PG::RecoveryState::WaitRemoteBackfillReserved::exit()
   PG *pg = context< RecoveryMachine >().pg;
   utime_t dur = ceph_clock_now(pg->cct) - enter_time;
   pg->osd->recoverystate_perf->tinc(rs_waitremotebackfillreserved_latency, dur);
-}
-
-boost::statechart::result
-PG::RecoveryState::WaitRemoteBackfillReserved::react(const RemoteBackfillReserved &evt)
-{
-  PG *pg = context< RecoveryMachine >().pg;
-  pg->state_clear(PG_STATE_BACKFILL_TOOFULL);
-  return transit<Backfilling>();
 }
 
 boost::statechart::result
@@ -5508,6 +5513,8 @@ PG::RecoveryState::WaitLocalBackfillReserved::WaitLocalBackfillReserved(my_conte
 {
   context< RecoveryMachine >().log_enter(state_name);
   PG *pg = context< RecoveryMachine >().pg;
+  //Add this?
+  //pg->state_set(PG_STATE_BACKFILL_TOOFULL);
   pg->state_set(PG_STATE_BACKFILL_WAIT);
   pg->osd->local_reserver.request_reservation(
     pg->info.pgid,
@@ -5780,7 +5787,8 @@ void PG::RecoveryState::Recovering::release_reservations()
 {
   PG *pg = context< RecoveryMachine >().pg;
   assert(!pg->pg_log.get_missing().have_missing());
-  pg->state_clear(PG_STATE_RECOVERING);
+  //XXX: Not needed
+  //pg->state_clear(PG_STATE_RECOVERING);
 
   // release remote reservations
   for (set<int>::const_iterator i = context< Active >().sorted_acting_set.begin();
@@ -5896,6 +5904,8 @@ PG::RecoveryState::Active::Active(my_context ctx)
     NamedState(context< RecoveryMachine >().pg->cct, "Started/Primary/Active"),
     sorted_acting_set(context< RecoveryMachine >().pg->acting.begin(),
                       context< RecoveryMachine >().pg->acting.end()),
+    sorted_backfill_set(context< RecoveryMachine >().pg->backfill_targets.begin(),
+                      context< RecoveryMachine >().pg->backfill_targets.end()),
     all_replicas_activated(false)
 {
   context< RecoveryMachine >().log_enter(state_name);
