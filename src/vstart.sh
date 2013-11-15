@@ -2,7 +2,6 @@
 
 export PYTHONPATH=./pybind
 export LD_LIBRARY_PATH=.libs
-export DYLD_LIBRARY_PATH=$LD_LIBRARY_PATH
 
 
 # abort on failure
