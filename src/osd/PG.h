@@ -506,7 +506,7 @@ protected:
   };
   
   BackfillInterval backfill_info;
-  BackfillInterval peer_backfill_info;
+  map<int, BackfillInterval> peer_backfill_info;
   bool backfill_reserved;
   bool backfill_reserving;
 
@@ -514,6 +514,14 @@ protected:
 
 public:
   vector<int> backfill_targets;
+
+  bool check_backfill_targets(int osd) {
+    if (std::find(backfill_targets.begin(), backfill_targets.end(), osd)
+        != backfill_targets.end())
+      return true;
+    else
+      return false;
+  }
 
 protected:
 

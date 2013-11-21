@@ -699,8 +699,14 @@ protected:
       f->close_section();
     }
     {
-      f->open_object_section("peer_backfill_info");
-      peer_backfill_info.dump(f);
+      f->open_array_section("peer_backfill_info");
+      for (map<int, BackfillInterval>::const_iterator pbi = peer_backfill_info.begin();
+          pbi != peer_backfill_info.end(); ++pbi) {
+        f->dump_int("osd", pbi->first);
+        f->open_object_section("BackfillInterval");
+          pbi->second.dump(f);
+        f->close_section();
+      }
       f->close_section();
     }
     {
@@ -983,6 +989,10 @@ public:
 
   void do_osd_op_effects(OpContext *ctx);
 private:
+  hobject_t earliest_backfill();
+  hobject_t latest_backfill();
+  bool is_before_backfill(const hobject_t& oid);
+  bool is_after_backfill(const hobject_t& oid);
   uint64_t temp_seq; ///< last id for naming temp objects
   coll_t get_temp_coll(ObjectStore::Transaction *t);
   hobject_t generate_temp_object();  ///< generate a new temp object name
