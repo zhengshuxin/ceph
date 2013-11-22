@@ -702,7 +702,10 @@ void Monitor::bootstrap()
 void Monitor::_add_bootstrap_peer_hint(string cmd, cmdmap_t& cmdmap, ostream& ss)
 {
   string addrstr;
-  cmd_getval(g_ceph_context, cmdmap, "addr", addrstr);
+  if (!cmd_getval(g_ceph_context, cmdmap, "addr", addrstr)) {
+    ss << "unable to parse address string";
+    return;
+  }
   dout(10) << "_add_bootstrap_peer_hint '" << cmd << "' '"
            << addrstr << "'" << dendl;
 

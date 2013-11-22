@@ -2106,7 +2106,11 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     }
   } else if (prefix  == "osd find") {
     int64_t osd;
-    cmd_getval(g_ceph_context, cmdmap, "id", osd);
+    if (!cmd_getval(g_ceph_context, cmdmap, "id", osd)) {
+      ss << "unable to parse osd id";
+      r = -EINVAL;
+      goto reply;
+    }
     if (!osdmap.exists(osd)) {
       ss << "osd." << osd << " does not exist";
       r = -ENOENT;
@@ -3021,7 +3025,12 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
     }
 
     double weight;
-    cmd_getval(g_ceph_context, cmdmap, "weight", weight);
+    if (!cmd_getval(g_ceph_context, cmdmap, "weight", weight)) {
+      ss << "unable to parse weight val '"
+         << cmd_vartype_stringify(cmdmap["weight"]) << "'";
+      err = -EINVAL;
+      goto reply;
+    }
 
     string args;
     vector<string> argvec;
@@ -3083,7 +3092,12 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
       }
 
       double weight;
-      cmd_getval(g_ceph_context, cmdmap, "weight", weight);
+      if (!cmd_getval(g_ceph_context, cmdmap, "weight", weight)) {
+        ss << "unable to parse weight val '"
+           << cmd_vartype_stringify(cmdmap["weight"]) << "'";
+        err = -EINVAL;
+        goto reply;
+      }
 
       string args;
       vector<string> argvec;
@@ -3272,7 +3286,12 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
 	break;
       }
       double w;
-      cmd_getval(g_ceph_context, cmdmap, "weight", w);
+      if (!cmd_getval(g_ceph_context, cmdmap, "weight", w)) {
+        ss << "unable to parse weight val '"
+           << cmd_vartype_stringify(cmdmap["weight"]) << "'";
+        err = -EINVAL;
+        break;
+      }
 
       err = newcrush.adjust_item_weightf(g_ceph_context, id, w);
       if (err >= 0) {
@@ -3385,7 +3404,12 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
 
   } else if (prefix == "osd setmaxosd") {
     int64_t newmax;
-    cmd_getval(g_ceph_context, cmdmap, "newmax", newmax);
+    if (!cmd_getval(g_ceph_context, cmdmap, "newmax", newmax)) {
+      ss << "unable to parse value '"
+         << cmd_vartype_stringify(cmdmap["newmax"]) << "'";
+      err = -EINVAL;
+      goto reply;
+    }
 
     if (newmax > g_conf->mon_max_osd) {
       err = -ERANGE;
@@ -3524,9 +3548,17 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
     }
   } else if (prefix == "osd reweight") {
     int64_t id;
-    cmd_getval(g_ceph_context, cmdmap, "id", id);
+    if (!cmd_getval(g_ceph_context, cmdmap, "id", id)) {
+      ss << "unable to parse osd id";
+      err = -EINVAL;
+      goto reply;
+    }
     double w;
-    cmd_getval(g_ceph_context, cmdmap, "weight", w);
+    if (!cmd_getval(g_ceph_context, cmdmap, "weight", w)) {
+      ss << "unable to parse weight";
+      err = -EINVAL;
+      goto reply;
+    }
     long ww = (int)((double)CEPH_OSD_IN*w);
     if (ww < 0L) {
       ss << "weight must be > 0";
@@ -3543,7 +3575,11 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
 
   } else if (prefix == "osd lost") {
     int64_t id;
-    cmd_getval(g_ceph_context, cmdmap, "id", id);
+    if (!cmd_getval(g_ceph_context, cmdmap, "id", id)) {
+      ss << "unable to parse osd id";
+      err = -EINVAL;
+      goto reply;
+    }
     string sure;
     if (!cmd_getval(g_ceph_context, cmdmap, "sure", sure) || sure != "--yes-i-really-mean-it") {
       ss << "are you SURE?  this might mean real, permanent data loss.  pass "

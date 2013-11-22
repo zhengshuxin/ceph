@@ -826,10 +826,17 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
 
   } else if (prefix == "mds set_state") {
     int64_t gid;
-    if (!cmd_getval(g_ceph_context, cmdmap, "gid", gid))
+    if (!cmd_getval(g_ceph_context, cmdmap, "gid", gid)) {
+      ss << "error parsing 'gid'";
+      r = -EINVAL;
       goto out;
+    }
     int64_t state;
-    cmd_getval(g_ceph_context, cmdmap, "state", state);
+    if (!cmd_getval(g_ceph_context, cmdmap, "state", state)) {
+      ss << "error parsing 'state' string";
+      r = -EINVAL;
+      goto out;
+    }
     if (!pending_mdsmap.is_dne_gid(gid)) {
       MDSMap::mds_info_t& info = pending_mdsmap.get_info_gid(gid);
       info.state = state;
@@ -852,7 +859,11 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
 
   } else if (prefix == "mds rm") {
     int64_t gid;
-    cmd_getval(g_ceph_context, cmdmap, "gid", gid);
+    if (!cmd_getval(g_ceph_context, cmdmap, "gid", gid)) {
+      ss << "error parsing 'gid'";
+      r = -EINVAL;
+      goto out;
+    }
     int state = pending_mdsmap.get_state_gid(gid);
     if (state == 0) {
       ss << "mds gid " << gid << " dne";
@@ -872,7 +883,11 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
     }
   } else if (prefix == "mds rmfailed") {
     int64_t w;
-    cmd_getval(g_ceph_context, cmdmap, "who", w);
+    if (!cmd_getval(g_ceph_context, cmdmap, "who", w)) {
+      ss << "error parsing 'who'";
+      r = -EINVAL;
+      goto out;
+    }
     pending_mdsmap.failed.erase(w);
     stringstream ss;
     ss << "removed failed mds." << w;
@@ -898,7 +913,11 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
     r = 0;
   } else if (prefix == "mds compat rm_compat") {
     int64_t f;
-    cmd_getval(g_ceph_context, cmdmap, "feature", f);
+    if (!cmd_getval(g_ceph_context, cmdmap, "feature", f)) {
+      ss << "error parsing feature";
+      r = -EINVAL;
+      goto out;
+    }
     if (pending_mdsmap.compat.compat.contains(f)) {
       ss << "removing compat feature " << f;
       pending_mdsmap.compat.compat.remove(f);
@@ -909,7 +928,11 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
     }
   } else if (prefix == "mds compat rm_incompat") {
     int64_t f;
-    cmd_getval(g_ceph_context, cmdmap, "feature", f);
+    if (!cmd_getval(g_ceph_context, cmdmap, "feature", f)) {
+      ss << "error parsing feature";
+      r = -EINVAL;
+      goto out;
+    }
     if (pending_mdsmap.compat.incompat.contains(f)) {
       ss << "removing incompat feature " << f;
       pending_mdsmap.compat.incompat.remove(f);
@@ -991,8 +1014,16 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
   } else if (prefix == "mds newfs") {
     MDSMap newmap;
     int64_t metadata, data;
-    cmd_getval(g_ceph_context, cmdmap, "metadata", metadata);
-    cmd_getval(g_ceph_context, cmdmap, "data", data);
+    if (!cmd_getval(g_ceph_context, cmdmap, "metadata", metadata)) {
+      ss << "error parsing 'metadata'";
+      r = -EINVAL;
+      goto out;
+    }
+    if (!cmd_getval(g_ceph_context, cmdmap, "data", data)) {
+      ss << "error parsing 'data'";
+      r = -EINVAL;
+      goto out;
+    }
     string sure;
     cmd_getval(g_ceph_context, cmdmap, "sure", sure);
     if (sure != "--yes-i-really-mean-it") {
