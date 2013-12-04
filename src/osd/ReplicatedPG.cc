@@ -7419,15 +7419,16 @@ void ReplicatedPG::on_activate()
 {
   if (backfill_targets.empty())
     return;
-  dout(10) << "on activate: backfill_targets " << backfill_targets << dendl;
   last_backfill_started = earliest_backfill();
-#if 0
-  last_backfill_started = peer_info[backfill_targets[0]].last_backfill;
-#endif
-  dout(10) << "From " << last_backfill_started << " instead of " << peer_info[backfill_targets[0]].last_backfill << dendl;
+  new_backfill = true;
   assert(last_backfill_started != hobject_t::get_max());
-  //dout(10) << " backfill targets " << backfill_targets
- //	   << " from " << last_backfill_started << dendl;
+  dout(10) << "on activate: bft=" << backfill_targets
+	   << " from " << last_backfill_started << dendl;
+  for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+    dout(20) << "target osd." << backfill_targets[i]
+	     << " from " << peer_info[backfill_targets[i]].last_backfill
+	     << dendl;
+  }
 }
 
 void ReplicatedPG::on_change(ObjectStore::Transaction *t)
@@ -8021,6 +8022,18 @@ int ReplicatedPG::recover_replicas(int max, ThreadPool::TPHandle &handle)
   return started;
 }
 
+hobject_t
+ReplicatedPG::earliest_peer_backfill()
+{
+  hobject_t e = hobject_t::get_max();
+  for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+    int peer = backfill_targets[i];
+    if (peer_backfill_info[peer].begin < e)
+      e = peer_backfill_info[peer].begin; 
+  }
+  return e;
+}
+
 /**
  * recover_backfill
  *
@@ -8029,21 +8042,23 @@ int ReplicatedPG::recover_replicas(int max, ThreadPool::TPHandle &handle)
  * backfilled: fully pushed to replica or present in replica's missing set (both
  * our copy and theirs).
  *
- * All objects on backfill_targets in [MIN,peer_backfill_info.begin) are either
+ * All objects on a backfill_target in
+ * [MIN,peer_backfill_info[backfill_target].begin) are either
  * not present or backfilled (all removed objects have been removed).
  * There may be PG objects in this interval yet to be backfilled.
  *
- * All objects in PG in [MIN,backfill_info.begin) have been backfilled to
- * backfill_targets.  There may be objects on backfill_target yet to be deleted.
+ * All objects in PG in [MIN,backfill_info.begin) have been backfilled to all
+ * backfill_targets.  There may be objects on backfill_target(s) yet to be deleted.
  *
- * All objects < MIN(peer_backfill_info.begin, backfill_info.begin) in PG are
- * backfilled.  No deleted objects in this interval remain on backfill_target.
+ * For a backfill target, all objects < MIN(peer_backfill_info[target].begin,
+ *     backfill_info.begin) in PG are backfilled.  No deleted objects in this
+ * interval remain on the backfill target.
  *
- * All objects <= peer_info[backfill_target].last_backfill have been backfilled
- * to backfill_target
+ * For a backfill target, all objects <= peer_info[target].last_backfill
+ * have been backfilled to target
  *
  * There *MAY* be objects between last_backfill_started and
- * MIN(peer_backfill_info.begin, backfill_info.begin) in the event that client
+ * MIN(peer_backfill_info[*].begin, backfill_info.begin) in the event that client
  * io created objects since the last scan.  For this reason, we call
  * update_range() again before continuing backfill.
  */
@@ -8051,49 +8066,38 @@ int ReplicatedPG::recover_backfill(
   int max,
   ThreadPool::TPHandle &handle, bool *work_started)
 {
-  dout(10) << "recover_backfill (" << max << ") " << backfill_targets
-      << " last_backfill_started " << last_backfill_started << dendl;
+  dout(10) << "recover_backfill (" << max << ")"
+           << " bft=" << backfill_targets
+	   << " last_backfill_started " << last_backfill_started << dendl;
   assert(!backfill_targets.empty());
 
-  for (unsigned i = 0 ; i < backfill_targets.size(); ++i) {
-    int peer = backfill_targets[i];
-    pg_info_t& pinfo = peer_info[peer];
-    bool created = false;
-    map<int, BackfillInterval>::iterator it = peer_backfill_info.find(peer);
-
-    if (it == peer_backfill_info.end()) {
-      created = true;
-      BackfillInterval bi;
-      peer_backfill_info.insert(pair<int, BackfillInterval>(peer, bi));
-      it = peer_backfill_info.find(peer);
-    }
-
-    BackfillInterval& pbi = it->second;
-
-#if 0
-    // Initialize from prior backfill state
-    if (pbi.begin < pinfo.last_backfill)
-      pbi.reset(pinfo.last_backfill);
-#endif
-
-    dout(10) << " peer osd." << peer
-	   << " info " << pinfo
-	   << (created ?  " created" : "") << " interval " << pbi.begin << "-" << pbi.end
-	   << " " << pbi.objects.size() << " objects" << dendl;
-  }
-
-  //XXX: Look through backfill_targets
-  pg_info_t& pinfo = peer_info[backfill_targets[0]];
-  BackfillInterval& pbi = peer_backfill_info.find(backfill_targets[0])->second;
+  //pg_info_t& pinfo = peer_info[backfill_target];
+  //BackfillInterval& pbi = peer_backfill_info;
 
   // Initialize from prior backfill state
-  if (pbi.begin < pinfo.last_backfill) {
-    pbi.reset(pinfo.last_backfill);
-    backfill_info.reset(pinfo.last_backfill);
+  if (new_backfill) {
+    // on_activate() was called prior to getting here
+    assert(last_backfill_started == earliest_backfill());
+    new_backfill = false;
+    for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+      int bt = backfill_targets[i];
+      peer_backfill_info[bt].reset(peer_info[bt].last_backfill);
+    }
+    backfill_info.reset(last_backfill_started); // XXX
+  }
+
+  for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+    int bt = backfill_targets[i];
+    dout(10) << "peer osd." << bt
+	   << " info " << peer_info[bt]
+	   << " interval " << peer_backfill_info[bt].begin
+	   << "-" << peer_backfill_info[bt].end
+	   << " " << peer_backfill_info[bt].objects.size() << " objects"
+	   << dendl;
   }
 
   // update our local interval to cope with recent changes
-  backfill_info.begin = last_backfill_started;
+  backfill_info.begin = last_backfill_started; // See XXX above and below
   update_range(&backfill_info, handle);
 
   int ops = 0;
@@ -8102,12 +8106,15 @@ int ReplicatedPG::recover_backfill(
   map<hobject_t, eversion_t> to_remove;
   set<hobject_t> add_to_stat;
 
-  pbi.trim_to(last_backfill_started);
-  backfill_info.trim_to(last_backfill_started);
+  for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+    int bt = backfill_targets[i];
+    peer_backfill_info[bt].trim_to(last_backfill_started);
+  }
+  backfill_info.trim_to(last_backfill_started);	// XXX: Didn't update_range just happen?
 
-  hobject_t backfill_pos = MIN(backfill_info.begin, pbi.begin);
+  hobject_t backfill_pos = MIN(backfill_info.begin, earliest_peer_backfill());
   while (ops < max) {
-    if (backfill_info.begin <= pbi.begin &&
+    if (backfill_info.begin <= earliest_peer_backfill() &&
 	!backfill_info.extends_to_end() && backfill_info.empty()) {
       hobject_t next = backfill_info.end;
       backfill_info.clear();
@@ -8116,29 +8123,54 @@ int ReplicatedPG::recover_backfill(
       update_range(&backfill_info, handle);
       backfill_info.trim();
     }
-    backfill_pos = MIN(backfill_info.begin, pbi.begin);
+    backfill_pos = MIN(backfill_info.begin, earliest_peer_backfill());
 
     dout(20) << "   my backfill " << backfill_info.begin << "-" << backfill_info.end
 	     << " " << backfill_info.objects << dendl;
-    dout(20) << " peer backfill " << pbi.begin << "-" << pbi.end << " " << pbi.objects << dendl;
 
-    if (pbi.begin <= backfill_info.begin &&
-	!pbi.extends_to_end() && pbi.empty()) {
-      dout(10) << " scanning peer osd." << backfill_targets[0] << " from " << pbi.end << dendl;
-      epoch_t e = get_osdmap()->get_epoch();
-      MOSDPGScan *m = new MOSDPGScan(MOSDPGScan::OP_SCAN_GET_DIGEST, e, e, info.pgid,
+    bool sent_scan = false;
+    for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+      int bt = backfill_targets[i];
+      BackfillInterval& pbi = peer_backfill_info[bt];
+
+      dout(20) << " peer osd." << bt << " backfill " << pbi.begin << "-"
+	       << pbi.end << " " << pbi.objects << dendl;
+      if (pbi.begin <= backfill_info.begin &&
+	  !pbi.extends_to_end() && pbi.empty()) {
+	dout(10) << " scanning peer osd." << bt << " from " << pbi.end << dendl;
+	epoch_t e = get_osdmap()->get_epoch();
+	MOSDPGScan *m = new MOSDPGScan(MOSDPGScan::OP_SCAN_GET_DIGEST, e, e, info.pgid,
 				     pbi.end, hobject_t());
-      osd->send_message_osd_cluster(backfill_targets[0], m, get_osdmap()->get_epoch());
-      assert(waiting_on_backfill.find(backfill_targets[0]) == waiting_on_backfill.end());
-      waiting_on_backfill.insert(backfill_targets[0]);
-      start_recovery_op(pbi.end);
-      ops++;
-      break;
+	osd->send_message_osd_cluster(bt, m, get_osdmap()->get_epoch());
+	assert(waiting_on_backfill.find(bt) == waiting_on_backfill.end());
+	waiting_on_backfill.insert(bt);
+        sent_scan = true;
+      }
     }
 
-    if (backfill_info.empty() && pbi.empty()) {
-      dout(10) << " reached end for both local and peer" << dendl;
-      break;
+    // Count simultaneous scans as a single op and let those complete
+    if (sent_scan) {
+        ops++;
+	start_recovery_op(pbi.end);
+        break;
+    }
+
+    if (backfill_info.empty()) {
+      bool empty = true;
+      for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+        int bt = backfill_targets[i];
+        BackfillInterval& pbi = peer_backfill_info[bt];
+  
+        if (!pbi.empty()) {
+          empty = false;
+          break;
+        }
+      }
+  
+      if (empty) {
+	dout(10) << " reached end for both local and all peers" << dendl;
+	break;
+      }
     }
 
     if (pbi.begin < backfill_info.begin) {
@@ -8192,7 +8224,7 @@ int ReplicatedPG::recover_backfill(
       if (obc->get_backfill_read()) {
 	dout(20) << " pushing local " << backfill_info.begin << " "
 		 << backfill_info.objects.begin()->second
-		 << " to peer osd." << backfill_targets[0] << dendl;
+		 << " to peer osd." << backfill_target << dendl;
 	to_push[backfill_info.begin] =
 	  boost::make_tuple(
 	    backfill_info.objects.begin()->second,
@@ -8226,7 +8258,7 @@ int ReplicatedPG::recover_backfill(
     handle.reset_tp_timeout();
 
     // ordered before any subsequent updates
-    send_remove_op(i->first, i->second, backfill_targets[0]);
+    send_remove_op(i->first, i->second, backfill_target);
 
     pending_backfill_updates[i->first]; // add empty stat!
   }
@@ -8240,7 +8272,7 @@ int ReplicatedPG::recover_backfill(
     handle.reset_tp_timeout();
     prep_backfill_object_push(
       i->first, i->second.get<0>(), i->second.get<1>(), i->second.get<2>(),
-      backfill_targets[0], h);
+      backfill_target, h);
   }
   pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
 
@@ -8282,39 +8314,29 @@ int ReplicatedPG::recover_backfill(
     new_last_backfill = backfill_pos;
     last_backfill_started = backfill_pos;
   }
-  for (unsigned i = 0 ; i < backfill_targets.size(); ++i) {
-    int peer = backfill_targets[i];
-    pg_info_t& pinfo = peer_info[peer];
-
-    if (new_last_backfill > pinfo.last_backfill) {
-      pinfo.last_backfill = new_last_backfill;
-      epoch_t e = get_osdmap()->get_epoch();
-      MOSDPGBackfill *m = NULL;
-      if (pinfo.last_backfill.is_max()) {
-        m = new MOSDPGBackfill(MOSDPGBackfill::OP_BACKFILL_FINISH, e, e, info.pgid);
-        // Use default priority here, must match sub_op priority
-        /* pinfo.stats might be wrong if we did log-based recovery on the
-         * backfilled portion in addition to continuing backfill.
-         */
-        pinfo.stats = info.stats;
-        //start_recovery_op(hobject_t::get_max());
-      } else {
-        m = new MOSDPGBackfill(MOSDPGBackfill::OP_BACKFILL_PROGRESS, e, e, info.pgid);
-        // Use default priority here, must match sub_op priority
-      }
-      m->last_backfill = pinfo.last_backfill;
-      m->stats = pinfo.stats;
-      osd->send_message_osd_cluster(peer, m, get_osdmap()->get_epoch());
+  if (new_last_backfill > pinfo.last_backfill) {
+    pinfo.last_backfill = new_last_backfill;
+    epoch_t e = get_osdmap()->get_epoch();
+    MOSDPGBackfill *m = NULL;
+    if (pinfo.last_backfill.is_max()) {
+      m = new MOSDPGBackfill(MOSDPGBackfill::OP_BACKFILL_FINISH, e, e, info.pgid);
+      // Use default priority here, must match sub_op priority
+      /* pinfo.stats might be wrong if we did log-based recovery on the
+       * backfilled portion in addition to continuing backfill.
+       */
+      pinfo.stats = info.stats;
+      start_recovery_op(hobject_t::get_max());
+    } else {
+      m = new MOSDPGBackfill(MOSDPGBackfill::OP_BACKFILL_PROGRESS, e, e, info.pgid);
+      // Use default priority here, must match sub_op priority
     }
-    dout(10) << " peer osd." << peer << " num_objects now " << pinfo.stats.stats.sum.num_objects
+    m->last_backfill = pinfo.last_backfill;
+    m->stats = pinfo.stats;
+    osd->send_message_osd_cluster(backfill_target, m, get_osdmap()->get_epoch());
+  }
+
+  dout(10) << " peer num_objects now " << pinfo.stats.stats.sum.num_objects
 	   << " / " << info.stats.stats.sum.num_objects << dendl;
-  }
-
-  // XXX: This use to happen before a single send_message_osd_cluster() call
-  if (new_last_backfill.is_max()) {
-    start_recovery_op(hobject_t::get_max());
-  }
-
   if (ops)
     *work_started = true;
   return ops;
