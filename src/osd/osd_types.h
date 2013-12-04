@@ -1559,6 +1559,89 @@ inline ostream& operator<<(ostream& out, const pg_query_t& q) {
   return out;
 }
 
+class PGBackend;
+struct ObjectModDesc {
+  class Visitor {
+  public:
+    virtual void append(uint64_t old_offset) {}
+    virtual void setattrs(map<string, boost::optional<bufferlist> > &attrs) {}
+    virtual void rmobject(version_t old_version) {}
+    virtual void create() {}
+    virtual void update_snaps(set<snapid_t> &snaps) {}
+    virtual ~Visitor() {}
+  };
+  void visit(Visitor *visitor) const;
+  bool can_local_rollback;
+  bool stashed;
+  mutable bufferlist bl;
+  enum ModID {
+    APPEND = 1,
+    SETATTRS = 2,
+    DELETE = 3,
+    CREATE = 4,
+    UPDATE_SNAPS = 5
+  };
+  ObjectModDesc() : can_local_rollback(true), stashed(false) {}
+  void claim(ObjectModDesc &other) {
+    bl.clear();
+    bl.claim(other.bl);
+    can_local_rollback = other.can_local_rollback;
+    stashed = other.stashed;
+  }
+  void append_id(ModID id) {
+    uint8_t _id(id);
+    ::encode(_id, bl);
+  }
+  void append(uint64_t old_size) {
+    if (!can_local_rollback || stashed)
+      return;
+    append_id(APPEND);
+    ::encode(old_size, bl);
+  }
+  void setattrs(map<string, boost::optional<bufferlist> > &old_attrs) {
+    if (!can_local_rollback || stashed)
+      return;
+    append_id(SETATTRS);
+    ::encode(old_attrs, bl);
+  }
+  bool rmobject(version_t deletion_version) {
+    if (!can_local_rollback || stashed)
+      return false;
+    append_id(DELETE);
+    ::encode(deletion_version, bl);
+    stashed = true;
+    return true;
+  }
+  void create() {
+    if (!can_local_rollback || stashed)
+      return;
+    append_id(CREATE);
+  }
+  void update_snaps(set<snapid_t> &snaps) {
+    if (!can_local_rollback || stashed)
+      return;
+    append_id(UPDATE_SNAPS);
+    ::encode(snaps, bl);
+  }
+
+  // cannot be rolled back
+  void mark_unrollbackable() {
+    can_local_rollback = false;
+    bl.clear();
+  }
+  bool can_rollback() const {
+    return can_local_rollback;
+  }
+  bool empty() const {
+    return can_local_rollback && (bl.length() == 0);
+  }
+  void encode(bufferlist &bl) const;
+  void decode(bufferlist::iterator &bl);
+  void dump(Formatter *f) const;
+  static void generate_test_instances(list<ObjectModDesc*>& o);
+};
+WRITE_CLASS_ENCODER(ObjectModDesc)
+
 
 /**
  * pg_log_entry_t - single entry/event in pg log
