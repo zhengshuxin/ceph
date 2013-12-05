@@ -679,12 +679,15 @@ public:
   librados::ObjectWriteOperation write_op;
   bufferlist rbuffer;
 
+  bool do_append;
+
   WriteOp(int n,
 	  RadosTestContext *context,
 	  const string &oid,
+	  bool do_append,
 	  TestOpStat *stat = 0)
     : TestOp(n, context, stat),
-      oid(oid), waiting_on(0), last_acked_tid(0)
+      oid(oid), waiting_on(0), last_acked_tid(0), do_append(do_append)
   {}
 		
   void _begin()
@@ -697,8 +700,17 @@ public:
 
     cont = ContDesc(context->seq_num, context->current_snap, context->seq_num, prefix);
 
-    ContentsGenerator *cont_gen = new VarLenGenerator(
-      context->max_size, context->min_stride_size, context->max_stride_size);
+    ContentsGenerator *cont_gen;
+    if (do_append) {
+      ObjectDesc old_value;
+      assert(context->find_object(oid, &old_value));
+      cont_gen = new AppendGenerator(
+	old_value.most_recent_gen()->get_length(old_value.most_recent()),
+	context->max_size);
+    } else {
+      cont_gen = new VarLenGenerator(
+	context->max_size, context->min_stride_size, context->max_stride_size);
+    }
     context->update_object(cont_gen, oid, cont);
 
     context->oid_in_use.insert(oid);
@@ -733,8 +745,15 @@ public:
       librados::AioCompletion *completion =
 	context->rados.aio_create_completion((void*) cb_arg, &write_callback, NULL);
       waiting.insert(completion);
-      context->io_ctx.aio_write(context->prefix+oid, completion,
-				to_write, i.get_len(), i.get_start());
+      librados::ObjectWriteOperation op;
+      if (do_append) {
+	op.append(to_write);
+      } else {
+	op.write(i.get_start(), to_write);
+      }
+      context->io_ctx.aio_operate(
+	context->prefix+oid, completion,
+	&op);
     }
 
     bufferlist contbl;

@@ -49,7 +49,7 @@ public:
       stringstream oid;
       oid << m_op;
       cout << m_op << ": write initial oid " << oid.str() << std::endl;
-      return new WriteOp(m_op, &context, oid.str());
+      return new WriteOp(m_op, &context, oid.str(), true);
     } else if (m_op >= m_ops) {
       return NULL;
     }
@@ -98,7 +98,7 @@ private:
       oid = *(rand_choose(context.oid_not_in_use));
       cout << "write oid " << oid << " current snap is "
 	   << context.current_snap << std::endl;
-      return new WriteOp(m_op, &context, oid, m_stats);
+      return new WriteOp(m_op, &context, oid, false, m_stats);
 
     case TEST_OP_DELETE:
       oid = *(rand_choose(context.oid_not_in_use));
@@ -156,6 +156,12 @@ private:
 	   << " current snap is " << context.current_snap << std::endl;
       return new CopyFromOp(m_op, &context, oid, oid2, m_stats);
 
+    case TEST_OP_APPEND:
+      oid = *(rand_choose(context.oid_not_in_use));
+      cout << "append oid " << oid << " current snap is "
+	   << context.current_snap << std::endl;
+      return new WriteOp(m_op, &context, oid, true, m_stats);
+
     default:
       cerr << "Invalid op type " << type << std::endl;
       assert(0);
@@ -197,6 +203,7 @@ int main(int argc, char **argv)
     { TEST_OP_RMATTR, "rmattr", true },
     { TEST_OP_WATCH, "watch", true },
     { TEST_OP_COPY_FROM, "copy_from", true },
+    { TEST_OP_APPEND, "append", true },
     { TEST_OP_READ /* grr */, NULL },
   };
 

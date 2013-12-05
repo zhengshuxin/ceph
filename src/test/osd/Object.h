@@ -228,10 +228,9 @@ public:
 class AppendGenerator : public RandGenerator {
   uint64_t off;
   uint64_t max_len;
-  uint64_t max_intervals;
 public:
-  AppendGenerator(uint64_t off, uint64_t max_len, uint64_t max_intervals) :
-    off(off), max_len(max_len), max_intervals(max_intervals) {}
+  AppendGenerator(uint64_t off, uint64_t max_len) :
+    off(off), max_len(max_len) {}
   uint64_t get_length(const ContDesc &in) {
     RandWrap rand(in.seqnum);
     return off + (rand() % max_len);
