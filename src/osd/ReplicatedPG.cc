@@ -1673,7 +1673,7 @@ void ReplicatedPG::do_scan(
 
       if (waiting_on_backfill.empty()) {
         assert(peer_backfill_info.size() == backfill_targets.size());
-        finish_recovery_op(bi.begin);
+        finish_recovery_op(hobject_t::get_max());
       }
     }
     break;
@@ -4297,7 +4297,8 @@ int ReplicatedPG::prepare_transaction(OpContext *ctx)
   info.stats.stats.add(ctx->delta_stats, ctx->obc->obs.oi.category);
 
   for (unsigned i = 0; i < backfill_targets.size() ; ++i) {
-    pg_info_t& pinfo = peer_info[i];
+    int bt = backfill_targets[i];
+    pg_info_t& pinfo = peer_info[bt];
     if (soid <= pinfo.last_backfill)
       pinfo.stats.stats.add(ctx->delta_stats, ctx->obc->obs.oi.category);
     else if (soid <= last_backfill_started)
@@ -8034,6 +8035,16 @@ ReplicatedPG::earliest_peer_backfill()
   return e;
 }
 
+bool
+ReplicatedPG::all_peer_empty()
+{
+  for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+    if (!peer_backfill_info[backfill_targets[i]].empty())
+      return false;
+  }
+  return true;
+}
+
 /**
  * recover_backfill
  *
@@ -8101,9 +8112,9 @@ int ReplicatedPG::recover_backfill(
   update_range(&backfill_info, handle);
 
   int ops = 0;
-  map<hobject_t,
-      boost::tuple<eversion_t, eversion_t, ObjectContextRef> > to_push;
-  map<hobject_t, eversion_t> to_remove;
+  vector<boost::tuple<hobject_t, eversion_t,
+                      eversion_t, ObjectContextRef, int> > to_push;
+  vector<boost::tuple<hobject_t, eversion_t, int> > to_remove;
   set<hobject_t> add_to_stat;
 
   for (unsigned i = 0; i < backfill_targets.size(); ++i) {
@@ -8151,53 +8162,80 @@ int ReplicatedPG::recover_backfill(
     // Count simultaneous scans as a single op and let those complete
     if (sent_scan) {
         ops++;
-	start_recovery_op(pbi.end);
+	start_recovery_op(hobject_t::get_max()); // XXX: was pbi.end
         break;
     }
 
-    if (backfill_info.empty()) {
-      bool empty = true;
-      for (unsigned i = 0; i < backfill_targets.size(); ++i) {
-        int bt = backfill_targets[i];
-        BackfillInterval& pbi = peer_backfill_info[bt];
-  
-        if (!pbi.empty()) {
-          empty = false;
-          break;
-        }
-      }
-  
-      if (empty) {
-	dout(10) << " reached end for both local and all peers" << dendl;
-	break;
-      }
+    if (backfill_info.empty() && all_peer_empty()) {
+      dout(10) << " reached end for both local and all peers" << dendl;
+      break;
     }
 
-    if (pbi.begin < backfill_info.begin) {
-      dout(20) << " removing peer " << pbi.begin << dendl;
-      to_remove[pbi.begin] = pbi.objects.begin()->second;
-      // Object was degraded, but won't be recovered
-      if (waiting_for_degraded_object.count(pbi.begin)) {
-	requeue_ops(
-	  waiting_for_degraded_object[pbi.begin]);
-	waiting_for_degraded_object.erase(pbi.begin);
+    // Get object within set of peers to operate on and
+    // the set of targets for which that object applies.
+    hobject_t check = earliest_peer_backfill();
+    vector<int> my_targets;
+    for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+      int bt = backfill_targets[i];
+      BackfillInterval& pbi = peer_backfill_info[bt];
+      if (pbi.begin == check)
+        my_targets.push_back(bt);
+    }
+    assert(!my_targets.empty());
+
+    assert(!waiting_for_degraded_object.count(check)); // XXX?
+    if (check < backfill_info.begin) {
+      dout(20) << " removing peer " << check
+	       << " on " << my_targets << dendl;
+      for (unsigned i = 0; i < my_targets.size(); ++i) {
+        int bt = my_targets[i];
+        BackfillInterval& pbi = peer_backfill_info[bt];
+        assert(pbi.begin == check);
+
+        to_remove.push_back(boost::make_tuple(pbi.begin, pbi.objects.begin()->second, bt));
+#if 0
+        // Object was degraded, but won't be recovered
+        if (waiting_for_degraded_object.count(pbi.begin)) {
+	  requeue_ops(
+	    waiting_for_degraded_object[pbi.begin]);
+	  waiting_for_degraded_object.erase(pbi.begin);
+        }
+#endif
+        pbi.pop_front();
       }
-      last_backfill_started = pbi.begin;
-      pbi.pop_front();
+      last_backfill_started = check;
       // Don't increment ops here because deletions
       // are cheap and not replied to unlike real recovery_ops,
       // and we can't increment ops without requeueing ourself
       // for recovery.
-    } else if (pbi.begin == backfill_info.begin) {
+    } else if (check == backfill_info.begin) {
       eversion_t& obj_v = backfill_info.objects.begin()->second;
-      if (pbi.objects.begin()->second != obj_v) {
-	ObjectContextRef obc = get_object_context(backfill_info.begin, false);
+
+      //Let's see if any peer needs a replacement version
+      bool need_replace = false;
+      for (unsigned i = 0; i < my_targets.size(); ++i) {
+	int bt = my_targets[i];
+	BackfillInterval& pbi = peer_backfill_info[bt];
+	if (pbi.objects.begin()->second != obj_v) {
+	  need_replace = true;
+	  break;
+        }
+      }
+
+      if (need_replace) {
+	ObjectContextRef obc = get_object_context(check, false);
 	assert(obc);
 	if (obc->get_backfill_read()) {
-	  dout(20) << " replacing peer " << pbi.begin << " with local "
-		   << obj_v << dendl;
-	  to_push[pbi.begin] = boost::make_tuple(
-	    obj_v, pbi.objects.begin()->second, obc);
+	  for (unsigned i = 0; i < my_targets.size(); ++i) {
+	    int bt = my_targets[i];
+	    BackfillInterval& pbi = peer_backfill_info[bt];
+
+	    dout(20) << " replacing peer " << check << " on osd." << bt
+		   << " with local " << obj_v << dendl;
+	    to_push.push_back(boost::make_tuple(check, obj_v,
+	                           pbi.objects.begin()->second, obc, bt));
+          }
+	  // Count all simultaneous pushes of the same object as a single op
 	  ops++;
 	} else {
 	  *work_started = true;
@@ -8206,33 +8244,38 @@ int ReplicatedPG::recover_backfill(
 	  break;
 	}
       } else {
-	dout(20) << " keeping peer " << pbi.begin << " "
-		 << pbi.objects.begin()->second << dendl;
-	// Object was degraded, but won't be recovered
-	if (waiting_for_degraded_object.count(pbi.begin)) {
-	  requeue_ops(waiting_for_degraded_object[pbi.begin]);
-	  waiting_for_degraded_object.erase(pbi.begin);
-	}
+        // All peers have version obj_v
+	dout(20) << " keeping peer " << check << " "
+		 << obj_v << dendl;
+	assert(!waiting_for_degraded_object.count(check));
       }
-      last_backfill_started = pbi.begin;
-      add_to_stat.insert(pbi.begin);
+      last_backfill_started = check;
+      add_to_stat.insert(check); // XXX: Only one for all pushes?
       backfill_info.pop_front();
-      pbi.pop_front();
+      for (unsigned i = 0; i < my_targets.size(); ++i) {
+        int bt = my_targets[i];
+        BackfillInterval& pbi = peer_backfill_info[bt];
+        pbi.pop_front();
+      }
     } else {
       ObjectContextRef obc = get_object_context(backfill_info.begin, false);
       assert(obc);
       if (obc->get_backfill_read()) {
-	dout(20) << " pushing local " << backfill_info.begin << " "
+	for (unsigned i = 0; i < my_targets.size(); ++i) {
+	  int bt = my_targets[i];
+
+	  dout(20) << " pushing local " << backfill_info.begin << " "
 		 << backfill_info.objects.begin()->second
-		 << " to peer osd." << backfill_target << dendl;
-	to_push[backfill_info.begin] =
-	  boost::make_tuple(
-	    backfill_info.objects.begin()->second,
-	    eversion_t(),
-	    obc);
+		 << " to peer osd." << bt << dendl;
+
+	  to_push.push_back(boost::make_tuple(backfill_info.begin,
+			           backfill_info.objects.begin()->second,
+	                           eversion_t(), obc, bt));
+        }
 	add_to_stat.insert(backfill_info.begin);
 	last_backfill_started = backfill_info.begin;
 	backfill_info.pop_front();
+	// Count all simultaneous pushes of the same object as a single op
 	ops++;
       } else {
 	*work_started = true;
@@ -8242,7 +8285,7 @@ int ReplicatedPG::recover_backfill(
       }
     }
   }
-  backfill_pos = MIN(backfill_info.begin, pbi.begin);
+  backfill_pos = MIN(backfill_info.begin, earliest_peer_backfill());
 
   for (set<hobject_t>::iterator i = add_to_stat.begin();
        i != add_to_stat.end();
@@ -8252,32 +8295,26 @@ int ReplicatedPG::recover_backfill(
     add_object_context_to_pg_stat(obc, &stat);
     pending_backfill_updates[*i] = stat;
   }
-  for (map<hobject_t, eversion_t>::iterator i = to_remove.begin();
-       i != to_remove.end();
-       ++i) {
+  for (unsigned i = 0; i < to_remove.size(); ++i) {
     handle.reset_tp_timeout();
 
     // ordered before any subsequent updates
-    send_remove_op(i->first, i->second, backfill_target);
+    send_remove_op(to_remove[i].get<0>(), to_remove[i].get<1>(), to_remove[i].get<2>());
 
-    pending_backfill_updates[i->first]; // add empty stat!
+    pending_backfill_updates[to_remove[i].get<0>()]; // add empty stat!
   }
 
   PGBackend::RecoveryHandle *h = pgbackend->open_recovery_op();
-  for (map<hobject_t,
-	   boost::tuple<eversion_t, eversion_t, ObjectContextRef> >::iterator i =
-	     to_push.begin();
-       i != to_push.end();
-       ++i) {
+  for (unsigned i = 0; i < to_push.size(); ++i) {
     handle.reset_tp_timeout();
-    prep_backfill_object_push(
-      i->first, i->second.get<0>(), i->second.get<1>(), i->second.get<2>(),
-      backfill_target, h);
+    prep_backfill_object_push(to_push[i].get<0>(), to_push[i].get<1>(),
+	    to_push[i].get<2>(), to_push[i].get<3>(), to_push[i].get<4>(), h);
   }
   pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
 
-  dout(5) << "backfill_pos is " << backfill_pos << " and pinfo.last_backfill is "
-	  << pinfo.last_backfill << dendl;
+  dout(5) << "backfill_pos is " << backfill_pos << dendl;
+  //dout(5) << "backfill_pos is " << backfill_pos << " and pinfo.last_backfill is "
+  //	  << pinfo.last_backfill << dendl;
   for (set<hobject_t>::iterator i = backfills_in_flight.begin();
        i != backfills_in_flight.end();
        ++i) {
