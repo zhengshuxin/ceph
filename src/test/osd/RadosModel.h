@@ -154,18 +154,22 @@ public:
   string prefix;
   int errors;
   int max_in_flight;
-  ContentsGenerator &cont_gen;
   int seq_num;
   map<int,uint64_t> snaps;
   uint64_t seq;
   const char *rados_id;
   bool initialized;
   map<string, TestWatchContext*> watches;
-  
+  const uint64_t max_size;
+  const uint64_t min_stride_size;
+  const uint64_t max_stride_size;
+  AttrGenerator attr_gen;
 	
   RadosTestContext(const string &pool_name, 
 		   int max_in_flight,
-		   ContentsGenerator &cont_gen,
+		   uint64_t max_size,
+		   uint64_t min_stride_size,
+		   uint64_t max_stride_size,
 		   const char *id = 0) :
     state_lock("Context Lock"),
     pool_obj_cont(),
@@ -174,8 +178,11 @@ public:
     next_oid(0),
     errors(0),
     max_in_flight(max_in_flight),
-    cont_gen(cont_gen), seq_num(0), seq(0),
-    rados_id(id), initialized(false)
+    seq_num(0), seq(0),
+    rados_id(id), initialized(false),
+    max_size(max_size), 
+    min_stride_size(min_stride_size), max_stride_size(max_stride_size),
+    attr_gen(2000)
   {
   }
 
@@ -282,7 +289,7 @@ public:
 
   void rm_object_attrs(const string &oid, const set<string> &attrs)
   {
-    ObjectDesc new_obj(&cont_gen);
+    ObjectDesc new_obj;
     for (map<int, map<string,ObjectDesc> >::reverse_iterator i =
 	   pool_obj_cont.rbegin();
 	 i != pool_obj_cont.rend();
@@ -304,7 +311,7 @@ public:
 
   void remove_object_header(const string &oid)
   {
-    ObjectDesc new_obj(&cont_gen);
+    ObjectDesc new_obj;
     for (map<int, map<string,ObjectDesc> >::reverse_iterator i =
 	   pool_obj_cont.rbegin();
 	 i != pool_obj_cont.rend();
@@ -323,7 +330,7 @@ public:
 
   void update_object_header(const string &oid, const bufferlist &bl)
   {
-    ObjectDesc new_obj(&cont_gen);
+    ObjectDesc new_obj;
     for (map<int, map<string,ObjectDesc> >::reverse_iterator i =
 	   pool_obj_cont.rbegin();
 	 i != pool_obj_cont.rend();
@@ -342,7 +349,7 @@ public:
 
   void update_object_attrs(const string &oid, const map<string, ContDesc> &attrs)
   {
-    ObjectDesc new_obj(&cont_gen);
+    ObjectDesc new_obj;
     for (map<int, map<string,ObjectDesc> >::reverse_iterator i =
 	   pool_obj_cont.rbegin();
 	 i != pool_obj_cont.rend();
@@ -363,9 +370,10 @@ public:
     pool_obj_cont[current_snap].insert(pair<string,ObjectDesc>(oid, new_obj));
   }
 
-  void update_object(const string &oid, const ContDesc &contents)
+  void update_object(ContentsGenerator *cont_gen,
+		     const string &oid, const ContDesc &contents)
   {
-    ObjectDesc new_obj(&cont_gen);
+    ObjectDesc new_obj;
     for (map<int, map<string,ObjectDesc> >::reverse_iterator i = 
 	   pool_obj_cont.rbegin();
 	 i != pool_obj_cont.rend();
@@ -377,7 +385,8 @@ public:
       }
     }
     new_obj.exists = true;
-    new_obj.update(contents);
+    new_obj.update(cont_gen,
+		   contents);
     pool_obj_cont[current_snap].erase(oid);
     pool_obj_cont[current_snap].insert(pair<string,ObjectDesc>(oid, new_obj));
   }
@@ -406,7 +415,7 @@ public:
   void remove_object(const string &oid)
   {
     assert(!get_watch_context(oid));
-    ObjectDesc new_obj(&cont_gen);
+    ObjectDesc new_obj;
     pool_obj_cont[current_snap].erase(oid);
     pool_obj_cont[current_snap].insert(pair<string,ObjectDesc>(oid, new_obj));
   }
@@ -456,7 +465,7 @@ public:
   void roll_back(const string &oid, int snap)
   {
     assert(!get_watch_context(oid));
-    ObjectDesc contents(&cont_gen);
+    ObjectDesc contents;
     find_object(oid, &contents, snap);
     pool_obj_cont.rbegin()->second.erase(oid);
     pool_obj_cont.rbegin()->second.insert(pair<string,ObjectDesc>(oid, contents));
@@ -484,7 +493,7 @@ public:
     set<string> to_remove;
     {
       Mutex::Locker l(context->state_lock);
-      ObjectDesc obj(&context->cont_gen);
+      ObjectDesc obj;
       if (!context->find_object(oid, &obj)) {
 	context->kick();
 	done = true;
@@ -496,7 +505,7 @@ public:
       context->oid_not_in_use.erase(oid);
 
       if (rand() % 30) {
-	ContentsGenerator::iterator iter = context->cont_gen.get_iterator(cont);
+	ContentsGenerator::iterator iter = context->attr_gen.get_iterator(cont);
 	for (map<string, ContDesc>::iterator i = obj.attrs.begin();
 	     i != obj.attrs.end();
 	     ++i, ++iter) {
@@ -583,11 +592,12 @@ public:
     map<string, bufferlist> omap_contents;
     map<string, ContDesc> omap;
     bufferlist header;
-    ContentsGenerator::iterator keygen = context->cont_gen.get_iterator(cont);
+    ContentsGenerator::iterator keygen = context->attr_gen.get_iterator(cont);
     op.create(false);
     while (!*keygen) ++keygen;
     while (*keygen) {
-      header.append(*keygen);
+      if (*keygen != '_')
+	header.append(*keygen);
       ++keygen;
     }
     for (int i = 0; i < 20; ++i) {
@@ -598,10 +608,10 @@ public:
 	++keygen;
       }
       ContDesc val(cont);
-      val.seqnum += context->cont_gen.get_length(cont);
+      val.seqnum += context->attr_gen.get_length(cont);
       val.prefix = ("oid: " + oid);
       omap[key] = val;
-      bufferlist val_buffer = context->cont_gen.gen_attribute(val);
+      bufferlist val_buffer = context->attr_gen.gen_bl(val);
       omap_contents[key] = val_buffer;
       op.setxattr(key.c_str(), val_buffer);
     }
@@ -658,6 +668,7 @@ public:
   uint64_t last_acked_tid;
 
   librados::ObjectReadOperation read_op;
+  librados::ObjectWriteOperation write_op;
   bufferlist rbuffer;
 
   WriteOp(int n,
@@ -678,20 +689,23 @@ public:
 
     cont = ContDesc(context->seq_num, context->current_snap, context->seq_num, prefix);
 
-    context->update_object(oid, cont);
+    ContentsGenerator *cont_gen = new VarLenGenerator(
+      context->max_size, context->min_stride_size, context->max_stride_size);
+    context->update_object(cont_gen, oid, cont);
 
     context->oid_in_use.insert(oid);
     context->oid_not_in_use.erase(oid);
 
     interval_set<uint64_t> ranges;
-    context->cont_gen.get_ranges(cont, ranges);
+
+    cont_gen->get_ranges(cont, ranges);
     std::cout << num << ":  seq_num " << context->seq_num << " ranges " << ranges << std::endl;
     context->seq_num++;
     context->state_lock.Unlock();
 
     waiting_on = ranges.num_intervals();
     //cout << " waiting_on = " << waiting_on << std::endl;
-    ContentsGenerator::iterator gen_pos = context->cont_gen.get_iterator(cont);
+    ContentsGenerator::iterator gen_pos = cont_gen->get_iterator(cont);
     uint64_t tid = 1;
     for (interval_set<uint64_t>::iterator i = ranges.begin(); 
 	 i != ranges.end();
@@ -715,10 +729,25 @@ public:
 				to_write, i.get_len(), i.get_start());
     }
 
+    bufferlist contbl;
+    ::encode(cont, contbl);
     pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
       new pair<TestOp*, TestOp::CallbackInfo*>(
 	this,
-	new TestOp::CallbackInfo(tid));
+	new TestOp::CallbackInfo(++tid));
+    librados::AioCompletion *completion = context->rados.aio_create_completion(
+      (void*) cb_arg, &write_callback, NULL);
+    waiting.insert(completion);
+    waiting_on++;
+    write_op.setxattr("_header", contbl);
+    write_op.truncate(cont_gen->get_length(cont));
+    context->io_ctx.aio_operate(
+      context->prefix+oid, completion, &write_op);
+
+    cb_arg =
+      new pair<TestOp*, TestOp::CallbackInfo*>(
+	this,
+	new TestOp::CallbackInfo(++tid));
     rcompletion = context->rados.aio_create_completion(
       (void*) cb_arg, &write_callback, NULL);
     waiting_on++;
@@ -811,7 +840,7 @@ public:
       return;
     }
 
-    ObjectDesc contents(&context->cont_gen);
+    ObjectDesc contents;
     context->find_object(oid, &contents);
     bool present = !contents.deleted();
 
@@ -871,7 +900,6 @@ public:
     : TestOp(n, context, stat),
       completion(NULL),
       oid(oid),
-      old_value(&context->cont_gen),
       snap(0),
       retval(0),
       attrretval(0)
@@ -916,7 +944,7 @@ public:
 
     op.read(0,
 	    !old_value.has_contents() ? 0 :
-	    context->cont_gen.get_length(old_value.most_recent()),
+	    old_value.most_recent_gen()->get_length(old_value.most_recent()),
 	    &result,
 	    &retval);
 
@@ -957,15 +985,19 @@ public:
 	context->errors++;
       }
     } else {
+      map<string, bufferlist>::iterator iter = xattrs.find("_header");
+      if (iter == xattrs.end()) {
+	cerr << num << ": Error: did not find header attr" << std::endl;
+	assert(0);
+      }
+      bufferlist headerbl = iter->second;
+      xattrs.erase(iter);
       cout << num << ":  expect " << old_value.most_recent() << std::endl;
       assert(!old_value.deleted());
       if (old_value.has_contents()) {
 	ContDesc to_check;
-	bufferlist::iterator p = result.begin();
-	if (!context->cont_gen.read_header(p, to_check)) {
-	  cerr << num << ": Unable to decode oid " << oid << " at snap " << context->current_snap << std::endl;
-	  context->errors++;
-	}
+	bufferlist::iterator p = headerbl.begin();
+	::decode(to_check, p);
 	if (to_check != old_value.most_recent()) {
 	  cerr << num << ": oid " << oid << " found incorrect object contents " << to_check
 	       << ", expected " << old_value.most_recent() << std::endl;
@@ -1010,7 +1042,7 @@ public:
 	   ++omap_iter) {
 	assert(old_value.attrs.count(omap_iter->first));
 	assert(xattrs.count(omap_iter->first));
-	bufferlist bl = context->cont_gen.gen_attribute(
+	bufferlist bl = context->attr_gen.gen_bl(
 	  old_value.attrs[omap_iter->first]);
 	assert(bl.length() == omap_iter->second.length());
 	assert(bl.length() == xattrs[omap_iter->first].length());
@@ -1148,7 +1180,7 @@ public:
   void _begin()
   {
     context->state_lock.Lock();
-    ObjectDesc contents(&context->cont_gen);
+    ObjectDesc contents;
     context->find_object(oid, &contents);
     if (contents.deleted()) {
       context->kick();
@@ -1304,7 +1336,6 @@ public:
 	     TestOpStat *stat)
     : TestOp(n, context, stat),
       oid(oid), oid_src(oid_src),
-      src_value(&context->cont_gen),
       comp(NULL), done(0), version(0), r(0)
   {}
 
