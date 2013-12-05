@@ -706,7 +706,9 @@ public:
       assert(context->find_object(oid, &old_value));
       cont_gen = new AppendGenerator(
 	old_value.most_recent_gen()->get_length(old_value.most_recent()),
-	context->max_size);
+	context->min_stride_size,
+	context->max_stride_size,
+	3 * context->max_stride_size);
     } else {
       cont_gen = new VarLenGenerator(
 	context->max_size, context->min_stride_size, context->max_stride_size);
@@ -716,29 +718,30 @@ public:
     context->oid_in_use.insert(oid);
     context->oid_not_in_use.erase(oid);
 
-    interval_set<uint64_t> ranges;
+    map<uint64_t, uint64_t> ranges;
 
-    cont_gen->get_ranges(cont, ranges);
+    cont_gen->get_ranges_map(cont, ranges);
     std::cout << num << ":  seq_num " << context->seq_num << " ranges " << ranges << std::endl;
     context->seq_num++;
     context->state_lock.Unlock();
 
-    waiting_on = ranges.num_intervals();
+    waiting_on = ranges.size();
     //cout << " waiting_on = " << waiting_on << std::endl;
     ContentsGenerator::iterator gen_pos = cont_gen->get_iterator(cont);
     uint64_t tid = 1;
-    for (interval_set<uint64_t>::iterator i = ranges.begin(); 
+    for (map<uint64_t, uint64_t>::iterator i = ranges.begin(); 
 	 i != ranges.end();
 	 ++i, ++tid) {
       bufferlist to_write;
-      gen_pos.seek(i.get_start());
-      for (uint64_t k = 0; k != i.get_len(); ++k, ++gen_pos) {
+      gen_pos.seek(i->first);
+      for (uint64_t k = 0; k != i->second; ++k, ++gen_pos) {
 	to_write.append(*gen_pos);
       }
-      assert(to_write.length() == i.get_len());
+      assert(to_write.length() == i->second);
       assert(to_write.length() > 0);
-      std::cout << num << ":  writing " << context->prefix+oid << " from " << i.get_start()
-		<< " to " << i.get_len() + i.get_start() << " tid " << tid << std::endl;
+      std::cout << num << ":  writing " << context->prefix+oid
+		<< " from " << i->second
+		<< " to " << i->first + i->second << " tid " << tid << std::endl;
       pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
 	new pair<TestOp*, TestOp::CallbackInfo*>(this,
 						 new TestOp::CallbackInfo(tid));
@@ -749,7 +752,7 @@ public:
       if (do_append) {
 	op.append(to_write);
       } else {
-	op.write(i.get_start(), to_write);
+	op.write(i->first, to_write);
       }
       context->io_ctx.aio_operate(
 	context->prefix+oid, completion,
