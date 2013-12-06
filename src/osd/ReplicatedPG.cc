@@ -224,7 +224,7 @@ void ReplicatedPG::on_peer_recover(
   publish_stats_to_osd();
   // done!
   peer_missing[peer].got(soid, recovery_info.version);
-  if (!backfill_targets.empty() && peer == backfill_targets[0]
+  if (!backfill_targets.empty() && check_backfill_targets(peer)
     && backfills_in_flight.count(soid)) {
     map<hobject_t, ObjectContextRef>::iterator i = recovering.find(soid);
     assert(i != recovering.end());
@@ -1668,7 +1668,7 @@ void ReplicatedPG::do_scan(
 	  bi.objects[first] = i->second;
 	}
       }
-      peer_backfill_info.insert(pair<int, BackfillInterval>(from, bi));
+      peer_backfill_info[from] = bi;
 
       assert(waiting_on_backfill.find(from) != waiting_on_backfill.end());
       waiting_on_backfill.erase(from);
@@ -4995,7 +4995,7 @@ void ReplicatedPG::issue_repop(RepGather *repop, utime_t now)
 
     ::encode(repop->ctx->log, wr->logbl);
 
-    if (!backfill_targets.empty() && backfill_targets[0] == peer)
+    if (check_backfill_targets(peer))
       wr->pg_stats = pinfo.stats;  // reflects backfill progress
     else
       wr->pg_stats = info.stats;
@@ -7135,7 +7135,7 @@ eversion_t ReplicatedPG::pick_newest_available(const hobject_t& oid)
   for (unsigned i=1; i<actingbackfill.size(); ++i) {
     int peer = actingbackfill[i];
     if (!peer_missing[peer].is_missing(oid)) {
-      assert(!backfill_targets.empty() && peer == backfill_targets[0]);
+      assert(!check_backfill_targets(peer));
       continue;
     }
     eversion_t h = peer_missing[peer].missing[oid].have;
@@ -7644,7 +7644,7 @@ bool ReplicatedPG::start_recovery_ops(
       state_test(PG_STATE_BACKFILL) &&
       !backfill_targets.empty() && started < max &&
       missing.num_missing() == 0 &&
-      waiting_on_backfill.find(backfill_targets[0]) == waiting_on_backfill.end()) {
+      waiting_on_backfill.empty()) {
     if (get_osdmap()->test_flag(CEPH_OSDMAP_NOBACKFILL)) {
       dout(10) << "deferring backfill due to NOBACKFILL" << dendl;
       deferred_backfill = true;
@@ -8102,9 +8102,6 @@ int ReplicatedPG::recover_backfill(
 	   << " last_backfill_started " << last_backfill_started << dendl;
   assert(!backfill_targets.empty());
 
-  //pg_info_t& pinfo = peer_info[backfill_target];
-  //BackfillInterval& pbi = peer_backfill_info;
-
   // Initialize from prior backfill state
   if (new_backfill) {
     // on_activate() was called prior to getting here
@@ -8133,7 +8130,7 @@ int ReplicatedPG::recover_backfill(
 
   int ops = 0;
   vector<boost::tuple<hobject_t, eversion_t,
-                      ObjectContextRef, vector<int>&> > to_push;
+                      ObjectContextRef, vector<int> > > to_push;
   vector<boost::tuple<hobject_t, eversion_t, int> > to_remove;
   set<hobject_t> add_to_stat;
 
@@ -8201,7 +8198,7 @@ int ReplicatedPG::recover_backfill(
       if (pbi.begin == check)
         check_targets.push_back(bt);
     }
-    assert(!check_targets.empty());
+    assert(!check_targets.empty() || all_peer_empty());
 
     assert(!waiting_for_degraded_object.count(check)); // XXX?
     if (check < backfill_info.begin) {
@@ -8248,7 +8245,7 @@ int ReplicatedPG::recover_backfill(
 	  dout(20) << " replacing peer " << check << " on " << need_ver_peers
 		   << " with local " << obj_v << dendl;
 	  to_push.push_back(boost::tuple<hobject_t, eversion_t,
-                      ObjectContextRef, vector<int>&>(check, obj_v, obc, need_ver_peers));
+                      ObjectContextRef, vector<int> >(check, obj_v, obc, need_ver_peers));
 	  // Count all simultaneous pushes of the same object as a single op
 	  ops++;
 	} else {
@@ -8297,7 +8294,7 @@ int ReplicatedPG::recover_backfill(
 	         << " to peers " << missing_targets << dendl;
 
 	to_push.push_back(boost::tuple<hobject_t, eversion_t,
-                      ObjectContextRef, vector<int>&>(backfill_info.begin,
+                      ObjectContextRef, vector<int> >(backfill_info.begin,
 			           backfill_info.objects.begin()->second,
 	                           obc, missing_targets));
 	add_to_stat.insert(backfill_info.begin);
@@ -8419,7 +8416,7 @@ int ReplicatedPG::recover_backfill(
 void ReplicatedPG::prep_backfill_object_push(
   hobject_t oid, eversion_t v,
   ObjectContextRef obc,
-  vector<int>& peers,
+  vector<int> peers,
   PGBackend::RecoveryHandle *h)
 {
   dout(10) << "push_backfill_object " << oid << " v " << v << " to peers " << peers << dendl;
