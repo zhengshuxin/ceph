@@ -2520,6 +2520,12 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       
       // --- READS ---
 
+    case CEPH_OSD_OP_SYNC_READ:
+      if (pool.info.ec_pool()) {
+	result = -EOPNOTSUPP;
+	break;
+      }
+      // fall through
     case CEPH_OSD_OP_READ:
       ++ctx->num_read;
       {
@@ -3467,11 +3473,15 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
       // -- trivial map --
     case CEPH_OSD_OP_TMAPGET:
+      if (pool.info.ec_pool()) {
+	result = -EOPNOTSUPP;
+	break;
+      }
       ++ctx->num_read;
       {
 	vector<OSDOp> nops(1);
 	OSDOp& newop = nops[0];
-	newop.op.op = CEPH_OSD_OP_READ;
+	newop.op.op = CEPH_OSD_OP_SYNC_READ;
 	newop.op.extent.offset = 0;
 	newop.op.extent.length = 0;
 	do_osd_ops(ctx, nops);
@@ -3480,6 +3490,10 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       break;
 
     case CEPH_OSD_OP_TMAPPUT:
+      if (pool.info.ec_pool()) {
+	result = -EOPNOTSUPP;
+	break;
+      }
       ++ctx->num_write;
       {
 	//_dout_lock.Lock();
@@ -3534,6 +3548,10 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       break;
 
     case CEPH_OSD_OP_TMAPUP:
+      if (pool.info.ec_pool()) {
+	result = -EOPNOTSUPP;
+	break;
+      }
       ++ctx->num_write;
       result = do_tmapup(ctx, bp, osd_op);
       break;
