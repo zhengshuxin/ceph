@@ -4894,7 +4894,7 @@ int ReplicatedPG::finish_copyfrom(OpContext *ctx)
     ctx->op_t->remove(obs.oi.soid);
   }
 
-  if (!ctx->obs->exists) {
+  if (!obs.exists) {
     ctx->delta_stats.num_objects++;
     obs.exists = true;
   }
