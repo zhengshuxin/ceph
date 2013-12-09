@@ -8246,9 +8246,6 @@ int ReplicatedPG::recover_backfill(
         } else {
 	  pg_info_t& pinfo = peer_info[bt];
 
-          // We are here because this target doesn't have the object
-          // In that case it can't be the peer's last_backfill object.
-          assert(backfill_info.begin != pinfo.last_backfill);
           // Only include peers that we've caught up to their backfill line
 	  // otherwise, they only appear to be missing this object
 	  // because their pbi.begin > backfill_info.begin.
