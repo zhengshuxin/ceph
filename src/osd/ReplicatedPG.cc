@@ -8274,19 +8274,18 @@ int ReplicatedPG::recover_backfill(
 	    dout(20) << " BACKFILL replacing " << check
 		   << " with ver " << obj_v
 		   << " to peers " << need_ver_targs << dendl;
-	    to_push.push_back(
-	      boost::tuple<hobject_t, eversion_t, ObjectContextRef, vector<int> >
-	      (backfill_info.begin, obj_v, obc, need_ver_targs));
 	  }
 	  if (!missing_targs.empty()) {
 	    dout(20) << " BACKFILL pushing " << backfill_info.begin
 	         << " with ver " << obj_v
 	         << " to peers " << missing_targs << dendl;
-
-	    to_push.push_back(
-	      boost::tuple<hobject_t, eversion_t, ObjectContextRef, vector<int> >
-	      (backfill_info.begin, obj_v, obc, missing_targs));
 	  }
+	  vector<int> all_push = need_ver_targs;
+	  all_push.insert(all_push.end(), missing_targs.begin(), missing_targs.end());
+
+	  to_push.push_back(
+	    boost::tuple<hobject_t, eversion_t, ObjectContextRef, vector<int> >
+	    (backfill_info.begin, obj_v, obc, all_push));
 	  // Count all simultaneous pushes of the same object as a single op
 	  ops++;
 	} else {
