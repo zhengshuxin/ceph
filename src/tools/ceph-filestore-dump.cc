@@ -432,7 +432,7 @@ int finish_remove_pgs(ObjectStore *store, uint64_t *next_removal_seq)
   for (vector<coll_t>::iterator it = ls.begin();
        it != ls.end();
        ++it) {
-    pg_t pgid;
+    spg_t pgid;
     snapid_t snap;
 
     if (it->is_temp(pgid)) {
@@ -1196,7 +1196,7 @@ int main(int argc, char **argv)
     invalid_path(fspath);
   }
 
-  pg_t pgid;
+  spg_t pgid;
   if (pgidstr.length() && !pgid.parse(pgidstr.c_str())) {
     cout << "Invalid pgid '" << pgidstr << "' specified" << std::endl;
     exit(1);
@@ -1311,7 +1311,7 @@ int main(int argc, char **argv)
 
   for (it = ls.begin(); it != ls.end(); ++it) {
     snapid_t snap;
-    pg_t tmppgid;
+    spg_t tmppgid;
 
     if (!it->is_pg(tmppgid, snap)) {
       continue;

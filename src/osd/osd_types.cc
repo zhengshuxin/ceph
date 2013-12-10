@@ -457,7 +457,7 @@ ostream& operator<<(ostream& out, const pg_t &pg)
 
 const coll_t coll_t::META_COLL("meta");
 
-bool coll_t::is_temp(pg_t& pgid) const
+bool coll_t::is_temp(spg_t& pgid) const
 {
   const char *cstr(str.c_str());
   if (!pgid.parse(cstr))
@@ -470,7 +470,7 @@ bool coll_t::is_temp(pg_t& pgid) const
   return false;
 }
 
-bool coll_t::is_pg(pg_t& pgid, snapid_t& snap) const
+bool coll_t::is_pg(spg_t& pgid, snapid_t& snap) const
 {
   const char *cstr(str.c_str());
 
@@ -490,7 +490,7 @@ bool coll_t::is_pg(pg_t& pgid, snapid_t& snap) const
   return true;
 }
 
-bool coll_t::is_pg_prefix(pg_t& pgid) const
+bool coll_t::is_pg_prefix(spg_t& pgid) const
 {
   const char *cstr(str.c_str());
 
@@ -502,7 +502,7 @@ bool coll_t::is_pg_prefix(pg_t& pgid) const
   return true;
 }
 
-bool coll_t::is_removal(uint64_t *seq, pg_t *pgid) const
+bool coll_t::is_removal(uint64_t *seq, spg_t *pgid) const
 {
   if (str.substr(0, 11) != string("FORREMOVAL_"))
     return false;

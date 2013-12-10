@@ -2200,7 +2200,7 @@ void PG::write_info(ObjectStore::Transaction& t)
 epoch_t PG::peek_map_epoch(ObjectStore *store, coll_t coll, hobject_t &infos_oid, bufferlist *bl)
 {
   assert(bl);
-  pg_t pgid;
+  spg_t pgid;
   snapid_t snap;
   bool ok = coll.is_pg(pgid, snap);
   assert(ok);
