@@ -24,7 +24,7 @@ public:
     char buf[50];
     for (unsigned i = 0; i < count; ++i) {
       sprintf(buf, "hitsettest_%d", i);
-      hobject_t obj(object_t(buf), "", 0, i, 0, "");
+      hobject_t obj(object_t(buf), "", CEPH_NOSNAP, i, 0, "");
       hitset->insert(obj);
     }
     EXPECT_EQ(count, hitset->insert_count());
@@ -33,9 +33,31 @@ public:
     char buf[50];
     for (unsigned i = 0; i < count; ++i) {
       sprintf(buf, "hitsettest_%d", i);
-      hobject_t obj(object_t(buf), "", 0, i, 0, "");
+      hobject_t obj(object_t(buf), "", CEPH_NOSNAP, i, 0, "");
       EXPECT_TRUE(hitset->contains(obj));
     }
+  }
+  void test_snaps_no_hit_head() {
+    hobject_t obj(object_t("snap_test_obj"), "", CEPH_NOSNAP, 1, 0, "");
+    hobject_t obj_snap1(object_t("snap_test_obj"), "", 1, 1, 0, "");
+    // we track access to snaps against the head object
+    hitset->insert(obj_snap1);
+    EXPECT_TRUE(hitset->contains(obj_snap1));
+    EXPECT_FALSE(hitset->contains(obj));
+  }
+  void test_snap_collisions() {
+    hobject_t obj(object_t("snap_test_obj"), "", CEPH_NOSNAP, 1, 0, "");
+    hobject_t obj_snap1(object_t("snap_test_obj"), "", 1, 1, 0, "");
+    hobject_t obj_snap2(object_t("snap_test_obj"), "", 2, 1, 0, "");
+    hitset->insert(obj);
+    EXPECT_TRUE(hitset->contains(obj));
+    EXPECT_FALSE(hitset->contains(obj_snap1));
+    EXPECT_FALSE(hitset->contains(obj_snap2));
+    hitset->insert(obj_snap1);
+    EXPECT_TRUE(hitset->contains(obj_snap1));
+    EXPECT_FALSE(hitset->contains(obj_snap2));
+    hitset->insert(obj_snap2);
+    EXPECT_TRUE(hitset->contains(obj_snap2));
   }
 
 };
@@ -122,6 +144,16 @@ TEST_F(BloomHitSetTest, RejectsNoMatch) {
   EXPECT_LT(matches, 2);
 }
 
+TEST_F(BloomHitSetTest, SnapsNoHitHead) {
+  rebuild(0.1, 100, 1);
+  test_snaps_no_hit_head();
+}
+
+TEST_F(BloomHitSetTest, SnapsNoCollide) {
+  rebuild(0.1, 100, 1);
+  test_snap_collisions();
+}
+
 class ExplicitHashHitSetTest : public testing::Test, public HitSetTestStrap {
 public:
 
@@ -159,6 +191,14 @@ TEST_F(ExplicitHashHitSetTest, RejectsNoMatch) {
   EXPECT_EQ(matches, 0);
 }
 
+TEST_F(ExplicitHashHitSetTest, SnapsNoHitHead) {
+  test_snaps_no_hit_head();
+}
+
+TEST_F(ExplicitHashHitSetTest, SnapsNoCollide) {
+  test_snap_collisions();
+}
+
 class ExplicitObjectHitSetTest : public testing::Test, public HitSetTestStrap {
 public:
 
@@ -194,4 +234,12 @@ TEST_F(ExplicitObjectHitSetTest, RejectsNoMatch) {
     }
   }
   EXPECT_EQ(matches, 0);
+}
+
+TEST_F(ExplicitObjectHitSetTest, SnapsNoHitHead) {
+  test_snaps_no_hit_head();
+}
+
+TEST_F(ExplicitObjectHitSetTest, SnapsNoCollide) {
+  test_snap_collisions();
 }

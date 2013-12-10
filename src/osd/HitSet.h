@@ -171,12 +171,21 @@ WRITE_CLASS_ENCODER(HitSet::Params);
 
 ostream& operator<<(ostream& out, const HitSet::Params& p);
 
+namespace __gnu_cxx {
+  template<> struct hash<pair<uint32_t, uint64_t> > {
+    size_t operator()(const pair<uint32_t, uint64_t> &r) const {
+      static rjhash<uint64_t> I;
+      return r.first ^ I(r.second);
+    }
+  };
+}
+
 /**
  * explicitly enumerate hash hits in the set
  */
 class ExplicitHashHitSet : public HitSet::Impl {
   uint64_t count;
-  hash_set<uint32_t> hits;
+  hash_set<pair<uint32_t, uint64_t> > hits;
 public:
   class Params : public HitSet::Params::Impl {
   public:
@@ -207,15 +216,16 @@ public:
     return false;
   }
   void insert(const hobject_t& o) {
-    hits.insert(o.hash);
+    hits.insert(pair<uint32_t, uint64_t>(o.hash, o.snap.val));
     ++count;
   }
   bool contains(const hobject_t& o) const {
-    return hits.count(o.hash);
+    return hits.count(pair<uint32_t, uint64_t>(o.hash, o.snap.val));
   }
   unsigned insert_count() const {
     return count;
   }
+  /// This doesn't include snapshot accesses
   unsigned approx_unique_insert_count() const {
     return hits.size();
   }
@@ -234,8 +244,12 @@ public:
   void dump(Formatter *f) const {
     f->dump_unsigned("insert_count", count);
     f->open_array_section("hash_set");
-    for (hash_set<uint32_t>::const_iterator p = hits.begin(); p != hits.end(); ++p)
-      f->dump_unsigned("hash", *p);
+    for (hash_set<pair<uint32_t, uint64_t> >::const_iterator p = hits.begin(); p != hits.end(); ++p) {
+      f->open_object_section("object");
+      f->dump_unsigned("hash", p->first);
+      f->dump_unsigned("snapid", p->second);
+      f->close_section(); // object
+    }
     f->close_section();
   }
   static void generate_test_instances(list<ExplicitHashHitSet*>& o) {
@@ -428,10 +442,14 @@ public:
   }
 
   void insert(const hobject_t& o) {
-    bloom.insert(o.hash);
+    uint64_t snap_hash = rjhash64(o.snap);
+    uint32_t new_hash = (uint32_t)(snap_hash ^ (uint64_t)o.hash);
+    bloom.insert(new_hash);
   }
   bool contains(const hobject_t& o) const {
-    return bloom.contains(o.hash);
+    uint64_t snap_hash = rjhash64(o.snap);
+    uint32_t new_hash = (uint32_t)(snap_hash ^ (uint64_t)o.hash);
+    return bloom.contains(new_hash);
   }
   unsigned insert_count() const {
     return bloom.element_count();
