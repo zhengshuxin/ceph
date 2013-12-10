@@ -315,6 +315,53 @@ bool pg_t::parse(const char *s)
   return true;
 }
 
+bool spg_t::parse(const char *s)
+{
+  pgid.set_preferred(-1);
+  shard = ghobject_t::NO_SHARD;
+  uint64_t ppool;
+  uint32_t pseed;
+  int32_t pref;
+  uint32_t pshard;
+  int r = sscanf(s, "%llu.%x", (long long unsigned *)&ppool, &pseed);
+  if (r < 2)
+    return false;
+  pgid.set_pool(ppool);
+  pgid.set_ps(pseed);
+  s += r;
+
+  if (!s)
+    return true;
+
+  if (*s == 'p') {
+    r = sscanf(s, "p%d", &pref);
+    if (r == 1) {
+      pgid.set_preferred(pref);
+      s += r;
+    }
+  }
+
+  if (!s)
+    return true;
+
+  if (*s == '/') {
+    r = sscanf(s, "/%d", &pshard);
+    if (r == 1) {
+      shard = pshard;
+      s += r;
+    }
+  }
+  return true;
+}
+
+ostream& operator<<(ostream& out, const spg_t &pg)
+{
+  out << pg.pgid;
+  if (pg.is_no_shard())
+    out << "/" << pg.shard;
+  return out;
+}
+
 bool pg_t::is_split(unsigned old_pg_num, unsigned new_pg_num, set<pg_t> *children) const
 {
   assert(m_seed < old_pg_num);
