@@ -568,7 +568,7 @@ public:
   // pg -> primary osd
   int get_pg_primary(pg_t pg) const {
     vector<int> group;
-    int nrep = pg_to_osds(pg, group);
+    int nrep = pg_to_acting_osds(pg, group);
     if (nrep)
       return group[0];
     return -1;  // we fail!
