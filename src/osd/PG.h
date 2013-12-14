@@ -456,7 +456,7 @@ protected:
     }
 
     /// true if there are no objects in this interval
-    bool empty() {
+    bool empty() const {
       return objects.empty();
     }
 
@@ -515,7 +515,7 @@ protected:
 public:
   vector<int> backfill_targets;
 
-  bool check_backfill_targets(int osd) {
+  bool is_backfill_targets(int osd) {
     if (std::find(backfill_targets.begin(), backfill_targets.end(), osd)
         != backfill_targets.end())
       return true;
