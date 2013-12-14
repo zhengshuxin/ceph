@@ -2211,7 +2211,8 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     pg_t pgid = osdmap.object_locator_to_pg(oid, oloc);
     pg_t mpgid = osdmap.raw_pg_to_pg(pgid);
     vector<int> up, acting;
-    osdmap.pg_to_up_acting_osds(mpgid, up, acting);
+    int up_p, acting_p;
+    osdmap.pg_to_up_acting_osds(mpgid, &up, &up_p, &acting, &acting_p);
 
     string fullobjname;
     if (!namespacestr.empty())
@@ -2227,7 +2228,9 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
       f->dump_stream("raw_pgid") << pgid;
       f->dump_stream("pgid") << mpgid;
       f->dump_stream("up") << up;
+      f->dump_int("up_primary", up_p);
       f->dump_stream("acting") << acting;
+      f->dump_int("acting_primary", acting_p);
       f->close_section(); // osd_map
       f->flush(rdata);
     } else {
@@ -2235,7 +2238,8 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
         << " pool '" << poolstr << "' (" << pool << ")"
         << " object '" << fullobjname << "' ->"
         << " pg " << pgid << " (" << mpgid << ")"
-        << " -> up " << up << " acting " << acting;
+        << " -> up (" << up << ", p" << up_p << ") acting ("
+        << acting << ", p" << acting_p << ")";
       rdata.append(ds);
     }
   } else if ((prefix == "osd scrub" ||
