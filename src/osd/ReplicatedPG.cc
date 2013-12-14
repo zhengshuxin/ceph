@@ -1030,18 +1030,26 @@ hobject_t ReplicatedPG::earliest_backfill() const
   return e;
 }
 
-bool ReplicatedPG::is_before_backfill(const hobject_t& oid) const
+// if we have src_oids, we need to be careful of the target being
+// before and a src being after the last_backfill line, or else the
+// operation won't apply properly on the backfill_target.  (the
+// opposite is not a problem; if the target is after the line, we
+// don't apply on the backfill_target and it doesn't matter.)
+// With multi-backfill some backfill targets can be ahead of
+// last_backfill_started.  We consider each replica individually and
+// take the larger of last_backfill_started and the replicas last_backfill.
+bool ReplicatedPG::check_src_targ(const hobject_t& soid, const hobject_t& toid) const
 {
-  // XXX: Not using MAX(last_backfill_started, earliest_backfill());
-  // because original code didn't.  Backfills in flight would racey.
-  return oid <= earliest_backfill();
-}
+  for (unsigned i = 0; i < backfill_targets.size(); ++i) {
+    int bt = backfill_targets[i];
+    map<int, pg_info_t>::const_iterator iter = peer_info.find(bt);
+    assert(iter != peer_info.end());
 
-bool ReplicatedPG::is_after_backfill(const hobject_t& oid) const
-{
-  // XXX: Not using MAX(last_backfill_started, earliest_backfill());
-  // because original code didn't.  Backfills in flight would be racey.
-  return oid > earliest_backfill();
+    if (toid <= MAX(last_backfill_started, iter->second.last_backfill) &&
+	soid > MAX(last_backfill_started, iter->second.last_backfill))
+      return true;
+  }
+  return false;
 }
 
 /** do_op - do an op
@@ -1187,17 +1195,6 @@ void ReplicatedPG::do_op(OpRequestRef op)
     return;
   }
 
-  // if we have src_oids, we need to be careful of the target being
-  // before and a src being after the last_backfill line, or else the
-  // operation won't apply properly on the backfill_target.  (the
-  // opposite is not a problem; if the target is after the line, we
-  // don't apply on the backfill_target and it doesn't matter.)
-  // The last_backfill_started is used as the backfill line since
-  // that determines the boundary for writes.
-  bool before_backfill = false;
-  if (!backfill_targets.empty())
-    before_backfill = is_before_backfill(obc->obs.oi.soid);
-
   // src_oids
   map<hobject_t,ObjectContextRef> src_obc;
   for (vector<OSDOp>::iterator p = m->ops.begin(); p != m->ops.end(); ++p) {
@@ -1243,8 +1240,8 @@ void ReplicatedPG::do_op(OpRequestRef op)
 		  << obc->obs.oi.soid << dendl;
 	    osd->reply_op_error(op, -EINVAL);
 	  } else if (is_degraded_object(sobc->obs.oi.soid) ||
-		   (before_backfill && is_after_backfill(sobc->obs.oi.soid))) {
-	    if (is_degraded_object(sobc->obs.oi.soid))
+		   (check_src_targ(sobc->obs.oi.soid, obc->obs.oi.soid))) {
+	    if (is_degraded_object(sobc->obs.oi.soid)) {
 	      wait_for_degraded_object(sobc->obs.oi.soid, op);
 	    } else {
 	      waiting_for_degraded_object[sobc->obs.oi.soid].push_back(op);
