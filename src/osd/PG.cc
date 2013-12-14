@@ -5512,8 +5512,6 @@ PG::RecoveryState::WaitLocalBackfillReserved::WaitLocalBackfillReserved(my_conte
 {
   context< RecoveryMachine >().log_enter(state_name);
   PG *pg = context< RecoveryMachine >().pg;
-  //Add this?
-  //pg->state_set(PG_STATE_BACKFILL_TOOFULL);
   pg->state_set(PG_STATE_BACKFILL_WAIT);
   pg->osd->local_reserver.request_reservation(
     pg->info.pgid,
