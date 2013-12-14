@@ -993,8 +993,7 @@ public:
   void do_osd_op_effects(OpContext *ctx);
 private:
   hobject_t earliest_backfill() const;
-  bool is_before_backfill(const hobject_t& oid) const;
-  bool is_after_backfill(const hobject_t& oid) const;
+  bool check_src_targ(const hobject_t& soid, const hobject_t& toid) const;
   uint64_t temp_seq; ///< last id for naming temp objects
   coll_t get_temp_coll(ObjectStore::Transaction *t);
   hobject_t generate_temp_object();  ///< generate a new temp object name
