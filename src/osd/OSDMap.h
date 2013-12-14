@@ -575,6 +575,7 @@ public:
   }
 
 
+  // FIXME: this has 0-as-primary all over it
   /* what replica # is a given osd? 0 primary, -1 for none. */
   static int calc_pg_rank(int osd, vector<int>& acting, int nrep=0);
   static int calc_pg_role(int osd, vector<int>& acting, int nrep=0);
