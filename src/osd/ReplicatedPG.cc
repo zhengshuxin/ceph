@@ -8038,22 +8038,20 @@ hobject_t ReplicatedPG::earliest_peer_backfill() const
   return e;
 }
 
-// Special case is that some peers are empty because we aren't
-// yet considering them.
-bool ReplicatedPG::all_peer_empty() const
+bool ReplicatedPG::all_peer_done() const
 {
+  // Primary hasn't got any more objects
+  assert(backfill_info.empty());
+
   for (unsigned i = 0; i < backfill_targets.size(); ++i) {
     int bt = backfill_targets[i];
-    map<int, pg_info_t>::const_iterator iter = peer_info.find(bt);
-    assert(iter != peer_info.end());
-    // See if a particular peer would not have even been scanned yet
-    if (last_backfill_started < iter->second.last_backfill)
-      return false;
     map<int, BackfillInterval>::const_iterator piter =
       peer_backfill_info.find(bt);
     assert(piter != peer_backfill_info.end());
-    if (!piter->second.empty())
-      return false;
+    const BackfillInterval& pbi = piter->second;
+    // See if peer has more to process
+    if (!pbi.extends_to_end() || !pbi.empty())
+	return false;
   }
   return true;
 }
@@ -8178,7 +8176,7 @@ int ReplicatedPG::recover_backfill(
         break;
     }
 
-    if (backfill_info.empty() && all_peer_empty()) {
+    if (backfill_info.empty() && all_peer_done()) {
       dout(10) << " reached end for both local and all peers" << dendl;
       break;
     }
@@ -8197,7 +8195,7 @@ int ReplicatedPG::recover_backfill(
         if (pbi.begin == check)
           check_targets.push_back(bt);
       }
-      assert(!check_targets.empty() || all_peer_empty());
+      assert(!check_targets.empty());
 
       dout(20) << " BACKFILL removing " << check
 	       << " from peers " << check_targets << dendl;
