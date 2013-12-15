@@ -805,7 +805,7 @@ protected:
   int recover_primary(int max, ThreadPool::TPHandle &handle);
   int recover_replicas(int max, ThreadPool::TPHandle &handle);
   hobject_t earliest_peer_backfill() const;
-  bool all_peer_empty() const;
+  bool all_peer_done() const;
   /**
    * @param work_started will be set to true if recover_backfill got anywhere
    * @returns the number of operations started
