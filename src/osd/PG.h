@@ -461,7 +461,7 @@ protected:
     }
 
     /// true if interval extends to the end of the range
-    bool extends_to_end() {
+    bool extends_to_end() const {
       return end.is_max();
     }
 
