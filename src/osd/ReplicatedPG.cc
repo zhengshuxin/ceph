@@ -8169,7 +8169,7 @@ int ReplicatedPG::recover_backfill(
       int bt = backfill_targets[i];
       peer_backfill_info[bt].reset(peer_info[bt].last_backfill);
     }
-    backfill_info.reset(last_backfill_started); // XXX
+    backfill_info.reset(last_backfill_started);
   }
 
   for (unsigned i = 0; i < backfill_targets.size(); ++i) {
@@ -8183,7 +8183,7 @@ int ReplicatedPG::recover_backfill(
   }
 
   // update our local interval to cope with recent changes
-  backfill_info.begin = last_backfill_started; // See XXX above and below
+  backfill_info.begin = last_backfill_started;
   update_range(&backfill_info, handle);
 
   int ops = 0;
@@ -8196,7 +8196,7 @@ int ReplicatedPG::recover_backfill(
     int bt = backfill_targets[i];
     peer_backfill_info[bt].trim_to(last_backfill_started);
   }
-  backfill_info.trim_to(last_backfill_started);	// XXX: Didn't update_range just happen?
+  backfill_info.trim_to(last_backfill_started);
 
   hobject_t backfill_pos = MIN(backfill_info.begin, earliest_peer_backfill());
   while (ops < max) {
@@ -8252,7 +8252,6 @@ int ReplicatedPG::recover_backfill(
     // the set of targets for which that object applies.
     hobject_t check = earliest_peer_backfill();
 
-    assert(!waiting_for_degraded_object.count(check)); // XXX?
     if (check < backfill_info.begin) {
 
       vector<int> check_targets;
@@ -8272,14 +8271,6 @@ int ReplicatedPG::recover_backfill(
         assert(pbi.begin == check);
 
         to_remove.push_back(boost::make_tuple(check, pbi.objects.begin()->second, bt));
-#if 0
-        // Object was degraded, but won't be recovered
-        if (waiting_for_degraded_object.count(pbi.begin)) {
-	  requeue_ops(
-	    waiting_for_degraded_object[pbi.begin]);
-	  waiting_for_degraded_object.erase(pbi.begin);
-        }
-#endif
         pbi.pop_front();
       }
       last_backfill_started = check;
@@ -8396,8 +8387,6 @@ int ReplicatedPG::recover_backfill(
   pgbackend->run_recovery_op(h, cct->_conf->osd_recovery_op_priority);
 
   dout(5) << "backfill_pos is " << backfill_pos << dendl;
-  //dout(5) << "backfill_pos is " << backfill_pos << " and pinfo.last_backfill is "
-  //	  << pinfo.last_backfill << dendl;
   for (set<hobject_t>::iterator i = backfills_in_flight.begin();
        i != backfills_in_flight.end();
        ++i) {
