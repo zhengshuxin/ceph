@@ -8050,8 +8050,11 @@ bool ReplicatedPG::all_peer_done() const
     assert(piter != peer_backfill_info.end());
     const BackfillInterval& pbi = piter->second;
     // See if peer has more to process
-    if (!pbi.extends_to_end() || !pbi.empty())
+    if (!pbi.extends_to_end() || !pbi.empty()) {
+      dout(5) << " NOT DONE peer osd." << bt << " backfill " << pbi.begin << "-"
+               << pbi.end << " " << pbi.objects.size() << " objects " << pbi.objects << dendl;
 	return false;
+    }
   }
   return true;
 }
