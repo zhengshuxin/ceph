@@ -1,5 +1,5 @@
 
-
+#include <errno.h>
 #include "rgw_fcgi.h"
 
 #include "acconfig.h"
@@ -12,12 +12,19 @@
 
 int RGWFCGX::write_data(const char *buf, int len)
 {
-  return FCGX_PutStr(buf, len, fcgx->out);
+  int r = FCGX_PutStr(buf, len, fcgx->out);
+  if (r < 0)
+    return -errno;
+  return r;
 }
 
 int RGWFCGX::read_data(char *buf, int len)
 {
-  return FCGX_GetStr(buf, len, fcgx->in);
+  int r = FCGX_GetStr(buf, len, fcgx->in);
+  if (r < 0)
+    return -errno;
+  return r;
+
 }
 
 void RGWFCGX::flush()
