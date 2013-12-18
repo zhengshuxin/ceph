@@ -186,6 +186,7 @@ OSDService::OSDService(OSD *osd) :
   scrub_finalize_wq(osd->scrub_finalize_wq),
   rep_scrub_wq(osd->rep_scrub_wq),
   push_wq("push_wq", cct->_conf->osd_recovery_thread_timeout, &osd->recovery_tp),
+  agent_wq("agent_wq", cct->_conf->osd_agent_thread_timeout, &osd->agent_tp),
   class_handler(osd->class_handler),
   publish_lock("OSDService::publish_lock"),
   pre_publish_lock("OSDService::pre_publish_lock"),
@@ -778,8 +779,8 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
 	 Messenger *hb_back_serverm,
 	 Messenger *osdc_messenger,
 	 MonClient *mc,
-	 const std::string &dev, const std::string &jdev) :
-  Dispatcher(cct_),
+	 const std::string &dev, const std::string &jdev)
+: Dispatcher(cct_),
   osd_lock("OSD::osd_lock"),
   tick_timer(cct, osd_lock),
   authorize_handler_cluster_registry(new AuthAuthorizeHandlerRegistry(cct,
@@ -808,6 +809,7 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
   recovery_tp(cct, "OSD::recovery_tp", cct->_conf->osd_recovery_threads, "osd_recovery_threads"),
   disk_tp(cct, "OSD::disk_tp", cct->_conf->osd_disk_threads, "osd_disk_threads"),
   command_tp(cct, "OSD::command_tp", 1),
+  agent_tp(cct, "OSD::agent_tp", cct->_conf->osd_agent_threads, "osd_agent_threads"),
   paused_recovery(false),
   heartbeat_lock("OSD::heartbeat_lock"),
   heartbeat_stop(false), heartbeat_need_update(true), heartbeat_epoch(0),
@@ -1143,6 +1145,7 @@ int OSD::init()
   recovery_tp.start();
   disk_tp.start();
   command_tp.start();
+  agent_tp.start();
 
   // start the heartbeat
   heartbeat_thread.create();
@@ -1414,6 +1417,7 @@ void OSD::suicide(int exitcode)
   disk_tp.pause();
   recovery_tp.pause();
   command_tp.pause();
+  agent_tp.pause();
 
   derr << " flushing io" << dendl;
   store->sync_and_flush();
@@ -1491,6 +1495,10 @@ int OSD::shutdown()
   heartbeat_cond.Signal();
   heartbeat_lock.Unlock();
   heartbeat_thread.join();
+
+  agent_tp.drain();
+  agent_tp.stop();
+  dout(10) << "agent tp stopped" << dendl;
 
   recovery_tp.drain();
   recovery_tp.stop();

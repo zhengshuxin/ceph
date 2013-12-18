@@ -308,6 +308,7 @@ public:
   ThreadPool::WorkQueue<PG> &scrub_finalize_wq;
   ThreadPool::WorkQueue<MOSDRepScrub> &rep_scrub_wq;
   GenContextWQ push_wq;
+  GenContextWQ agent_wq;
   ClassHandler  *&class_handler;
 
   void dequeue_pg(PG *pg, list<OpRequestRef> *dequeued);
@@ -804,6 +805,7 @@ private:
   ThreadPool recovery_tp;
   ThreadPool disk_tp;
   ThreadPool command_tp;
+  ThreadPool agent_tp;
 
   bool paused_recovery;
 
