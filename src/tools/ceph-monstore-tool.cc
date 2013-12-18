@@ -34,6 +34,7 @@
 #include "mon/Paxos.h"
 #include "common/Formatter.h"
 #include "include/stringify.h"
+#include "mds/MDSMap.h"
 
 namespace po = boost::program_options;
 using namespace std;
@@ -406,6 +407,77 @@ int main(int argc, char **argv) {
               << stringify(si_t(total_size)) << std::endl;
     std::cout << "from '" << store_path << "' to '" << out_path << "'"
               << std::endl;
+
+  } else if (cmd == "gen-mdsmaps") {
+    if (!store_path.size()) {
+      std::cerr << "need mon store path to use" << std::endl;
+      std::cerr << desc << std::endl;
+      goto done;
+    }
+
+    version_t v = 1000;
+    if (version > 0)
+      v = version;
+
+    version_t last = st.get("mdsmap", "last_committed");
+    assert(last > 0);
+
+    bufferlist bl;
+    int r = st.get("mdsmap", last, bl);
+    if (r < 0) {
+      std::cerr << "Error getting map v" << v
+                << ": " << cpp_strerror(r) << std::endl;
+      goto done;
+    }
+
+    MDSMap map;
+    bufferlist::iterator it = bl.begin();
+    map.decode(it);
+
+    std::cout << "map v" << map.get_epoch() << std::endl;
+
+    std::cout << "populating store with " << v << " maps" << std::endl;
+    uint64_t num_v = 0;
+    do {
+      MonitorDBStore::Transaction t;
+      for (int x = 0; x < 100 && num_v < v; x++, num_v++) {
+        bufferlist new_map_bl;
+        map.inc_epoch();
+        map.encode(new_map_bl, CEPH_FEATURES_ALL);
+        t.put("mdsmap", last+num_v+1, new_map_bl);
+
+        if (x % 10)
+          std::cout << "." << std::flush;
+      }
+      if (!t.empty()) {
+        t.put("mdsmap", "last_committed", last+num_v);
+        st.apply_transaction(t);
+      }
+    } while (num_v < v);
+    std::cout << std::endl;
+    std::cout << "checking store integrity" << std::endl;
+    version_t new_last = st.get("mdsmap", "last_committed");
+    version_t first = st.get("mdsmap", "first_committed");
+    assert(new_last == last+num_v);
+    assert(first > 0);
+    assert(new_last > first);
+    assert(st.exists("mdsmap", new_last));
+    bufferlist last_bl;
+    r = st.get("mdsmap", new_last, last_bl);
+    if (r < 0) {
+      std::cerr << "Error getting map v" << v
+                << ":" << cpp_strerror(r) << std::endl;
+      goto done;
+    }
+    MDSMap last_map;
+    it = last_bl.begin();
+    last_map.decode(it);
+    std::cout << "map v" << last_map.get_epoch() << ", new last = " << new_last << std::endl;
+    assert(last_map.get_epoch() == new_last);
+
+    std::cout << "finished: first_committed = " << first
+              << ", last_committed = " << last << std::endl;
+
   } else {
     std::cerr << "Unrecognized command: " << cmd << std::endl;
     goto done;
