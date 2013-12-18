@@ -531,7 +531,7 @@ OPTION(osd_max_attr_size, OPT_U64, 0)
 OPTION(osd_objectstore, OPT_STR, "filestore")  // ObjectStore backend type
 // Override maintaining compatibility with older OSDs
 // Set to true for testing.  Users should NOT set this.
-OPTION(osd_debug_override_acting_compat, OPT_BOOL, false)
+OPTION(osd_debug_override_acting_compat, OPT_BOOL, true)
 
 /// filestore wb throttle limits
 OPTION(filestore_wbthrottle_enable, OPT_BOOL, true)
