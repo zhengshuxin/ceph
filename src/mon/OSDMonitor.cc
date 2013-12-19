@@ -412,20 +412,48 @@ void OSDMonitor::update_logger()
 void OSDMonitor::remove_redundant_pg_temp()
 {
   dout(10) << "remove_redundant_pg_temp" << dendl;
+  map<pg_t,vector<int> >::iterator pgi = osdmap.pg_temp->begin();
+  map<pg_t,int>::iterator primaryi = osdmap.primary_temp->begin();
+  while (pgi != osdmap.pg_temp->end()) {
+    pg_t checking = MIN(pgi->first, primaryi->first);
+    /**
+     *  we can clear the entry iff:
+     *  1) The entry actually corresponds to the pg we're looking at
+     *  2) we don't have a different temp entry in the pending_inc
+     */
+    bool can_clear_pg = (pgi->first == checking) &&
+                        (pending_inc.new_pg_temp.count(pgi->first) == 0);
+    bool can_clear_primary = (primaryi->first == checking) &&
+        (pending_inc.new_primary_temp.count(primaryi->first) == 0);
 
-  for (map<pg_t,vector<int> >::iterator p = osdmap.pg_temp->begin();
-       p != osdmap.pg_temp->end();
-       ++p) {
-    if (pending_inc.new_pg_temp.count(p->first) == 0) {
+    // if allowed to clear, get mapping and see if we can clear
+    if (can_clear_pg || can_clear_primary) {
       vector<int> raw_up;
       int primary;
-      osdmap.pg_to_raw_up(p->first, &raw_up, &primary);
-      if (raw_up == p->second) {
-	dout(10) << " removing unnecessary pg_temp " << p->first << " -> " << p->second << dendl;
-	pending_inc.new_pg_temp[p->first].clear();
+      osdmap.pg_to_raw_up(pgi->first, &raw_up, &primary);
+      if (can_clear_pg && raw_up == pgi->second) {
+	dout(10) << " removing unnecessary pg_temp "
+	         << pgi->first << " -> " << pgi->second << dendl;
+	pending_inc.new_pg_temp[pgi->first].clear();
+      }
+      if (can_clear_primary && primary == primaryi->second) {
+        dout(10) << " removing unnecessary primary_temp "
+                  << primaryi->first << " -> " << primaryi->second << dendl;
+        pending_inc.new_primary_temp[primaryi->first] = -1;
       }
     }
+
+    // increment the iterator farthest back, or both if equal
+    if (pgi->first < primaryi->first)
+      ++pgi;
+    else if (primaryi->first < pgi->first)
+      ++primaryi;
+    else {
+      ++pgi;
+      ++primaryi;
+    }
   }
+  ++pgi;
 }
 
 void OSDMonitor::remove_down_pg_temp()
