@@ -503,7 +503,13 @@ private:
   void _raw_to_up_osds(pg_t pg, const vector<int>& raw,
                        vector<int> *up, int *primary) const;
 
-  bool _get_temp_osds(const pg_pool_t& pool, pg_t pg, vector<int>& temp) const;
+  /**
+   * Get the pg and primary temp, if they are specified.
+   * @param temp_pg [out] Will be empty or contain the temp PG mapping on return
+   * @param temp_primary [out] Will be -1 or contain the temp primary mapping on return
+   */
+  void _get_temp_osds(const pg_pool_t& pool, pg_t pg,
+                      vector<int> *temp_pg, int *temp_primary) const;
 
   /**
    *  map to up and acting. Fills in whatever fields are non-NULL, but
