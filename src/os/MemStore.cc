@@ -256,7 +256,10 @@ bool MemStore::exists(coll_t cid, const ghobject_t& oid)
     return false;
   RWLock::RLocker l(c->lock);
 
-  return (c->get_object(oid) != NULL);
+  if (c->get_object(oid))
+    return true;
+  else
+    return false;
 }
 
 int MemStore::stat(
