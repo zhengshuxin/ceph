@@ -1005,9 +1005,28 @@ bool PG::choose_acting(int& newest_update_osd)
     return false;
   }
 
-  // TODO: Add check of osdmap for all OSDs to be able to handle new acting
   // Determine if compatibility needed
   bool compat_mode = !cct->_conf->osd_debug_override_acting_compat;
+
+  if (compat_mode) {
+    bool all_support = true;
+    OSDMapRef osdmap = get_osdmap();
+    vector<int> allpeers;
+
+    allpeers = want;
+    allpeers.insert(allpeers.end(), backfill.begin(), backfill.end());
+    for (unsigned i = 0 ; i < allpeers.size(); ++i) {
+      int peer = allpeers[i];
+
+      const osd_xinfo_t& xi = osdmap->get_xinfo(peer);
+      if (!(xi.features & CEPH_FEATURE_OSD_ERASURE_CODES)) {
+	all_support = false;
+	break;
+      }
+    }
+    if (all_support)
+      compat_mode = false;
+  }
 
   // May not be necessary, but the old mechanism only did one at a time
   if (compat_mode && !backfill.empty()) {
