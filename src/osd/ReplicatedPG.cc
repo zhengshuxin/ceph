@@ -8401,8 +8401,14 @@ int ReplicatedPG::recover_backfill(
        i != pending_backfill_updates.end() &&
 	 i->first < next_backfill_to_complete;
        pending_backfill_updates.erase(i++)) {
-    // XXX: ???? pinfo.stats.add(i->second);
     assert(i->first > new_last_backfill);
+    for (unsigned j = 0; j < backfill_targets.size(); ++j) {
+      int bt = backfill_targets[j];
+      pg_info_t& pinfo = peer_info[bt];
+      //Add stats to all peers that were missing object
+      if (i->first > pinfo.last_backfill)
+        pinfo.stats.add(i->second);
+    }
     new_last_backfill = i->first;
   }
   dout(10) << "possible new_last_backfill at " << new_last_backfill << dendl;
