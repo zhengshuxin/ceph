@@ -3941,19 +3941,32 @@ done:
       goto reply;
     }
 
+    string pool_type_str;
+    cmd_getval(g_ceph_context, cmdmap, "pool_type", pool_type_str);
+
     string poolstr;
     cmd_getval(g_ceph_context, cmdmap, "pool", poolstr);
-    if (osdmap.name_pool.count(poolstr)) {
-      ss << "pool '" << poolstr << "' already exists";
-      err = 0;
+    int64_t pool_id = osdmap.lookup_pg_pool_name(poolstr);
+    if (pool_id >= 0) {
+      const pg_pool_t *p = osdmap.get_pg_pool(pool_id);
+      if ((pool_type_str.empty() || pool_type_str == "rep") &&
+	  p->type != pg_pool_t::TYPE_REP) {
+	ss << "pool '" << poolstr << "' cannot change to type replicated";
+	err = -EINVAL;
+      } else if (pool_type_str == "erasure" &&
+		 p->type != pg_pool_t::TYPE_ERASURE) {
+	ss << "pool '" << poolstr << "' cannot change to type erasure";
+	err = -EINVAL;
+      } else {
+	ss << "pool '" << poolstr << "' already exists";
+	err = 0;
+      }
       goto reply;
     }
 
     vector<string> properties;
     cmd_getval(g_ceph_context, cmdmap, "properties", properties);
 
-    string pool_type_str;
-    cmd_getval(g_ceph_context, cmdmap, "pool_type", pool_type_str);
     int pool_type;
     if (pool_type_str.empty() || pool_type_str == "rep") {
       pool_type = pg_pool_t::TYPE_REP;
