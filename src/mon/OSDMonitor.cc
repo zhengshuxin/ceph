@@ -409,88 +409,6 @@ void OSDMonitor::update_logger()
   mon->cluster_logger->set(l_cluster_osd_epoch, osdmap.get_epoch());
 }
 
-void OSDMonitor::remove_redundant_pg_temp()
-{
-  dout(10) << "remove_redundant_pg_temp" << dendl;
-  map<pg_t,vector<int> >::iterator pgi = osdmap.pg_temp->begin();
-  map<pg_t,int>::iterator primaryi = osdmap.primary_temp->begin();
-  while (pgi != osdmap.pg_temp->end()) {
-    pg_t checking = MIN(pgi->first, primaryi->first);
-    /**
-     *  we can clear the entry iff:
-     *  1) The entry actually corresponds to the pg we're looking at
-     *  2) we don't have a different temp entry in the pending_inc
-     */
-    bool can_clear_pg = (pgi->first == checking) &&
-                        (pending_inc.new_pg_temp.count(pgi->first) == 0);
-    bool can_clear_primary = (primaryi->first == checking) &&
-        (pending_inc.new_primary_temp.count(primaryi->first) == 0);
-
-    // if allowed to clear, get mapping and see if we can clear
-    if (can_clear_pg || can_clear_primary) {
-      vector<int> raw_up;
-      int primary;
-      osdmap.pg_to_raw_up(pgi->first, &raw_up, &primary);
-      if (can_clear_pg && raw_up == pgi->second) {
-	dout(10) << " removing unnecessary pg_temp "
-	         << pgi->first << " -> " << pgi->second << dendl;
-	pending_inc.new_pg_temp[pgi->first].clear();
-      }
-      if (can_clear_primary && primary == primaryi->second) {
-        dout(10) << " removing unnecessary primary_temp "
-                  << primaryi->first << " -> " << primaryi->second << dendl;
-        pending_inc.new_primary_temp[primaryi->first] = -1;
-      }
-    }
-
-    // increment the iterator farthest back, or both if equal
-    if (pgi->first < primaryi->first)
-      ++pgi;
-    else if (primaryi->first < pgi->first)
-      ++primaryi;
-    else {
-      ++pgi;
-      ++primaryi;
-    }
-  }
-  ++pgi;
-}
-
-void OSDMonitor::remove_down_pg_temp()
-{
-  dout(10) << "remove_down_pg_temp" << dendl;
-  OSDMap tmpmap(osdmap);
-  tmpmap.apply_incremental(pending_inc);
-
-  for (map<pg_t,vector<int> >::iterator p = tmpmap.pg_temp->begin();
-       p != tmpmap.pg_temp->end();
-       ++p) {
-    unsigned num_up = 0;
-    for (vector<int>::iterator i = p->second.begin();
-	 i != p->second.end();
-	 ++i) {
-      if (!tmpmap.is_down(*i))
-	++num_up;
-    }
-    if (num_up == 0)
-      pending_inc.new_pg_temp[p->first].clear();
-  }
-}
-
-void OSDMonitor::remove_down_primary_temp()
-{
-  dout(10) << "remove_down_primary_temp" << dendl;
-  OSDMap tmpmap(osdmap);
-  tmpmap.apply_incremental(pending_inc);
-
-  for (map<pg_t,int>::iterator p = tmpmap.primary_temp->begin();
-      p != tmpmap.primary_temp->end();
-      ++p) {
-    if (tmpmap.is_down(p->second))
-      pending_inc.new_primary_temp[p->first] = -1;
-  }
-}
-
 /* Assign a lower weight to overloaded OSDs.
  *
  * The osds that will get a lower weight are those with with a utilization
@@ -579,11 +497,11 @@ void OSDMonitor::create_pending()
   dout(10) << "create_pending e " << pending_inc.epoch << dendl;
 
   // drop any redundant pg_temp entries
-  remove_redundant_pg_temp();
+  OSDMap::remove_redundant_temporaries(g_ceph_context, osdmap, &pending_inc);
 
   // drop any pg or primary_temp entries with no up entries
-  remove_down_pg_temp();
-  remove_down_primary_temp();
+  OSDMap::remove_down_pg_temp(g_ceph_context, osdmap, &pending_inc);
+  OSDMap::remove_down_primary_temp(g_ceph_context, osdmap, &pending_inc);
 }
 
 /**

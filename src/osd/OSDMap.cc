@@ -952,6 +952,91 @@ void OSDMap::dedup(const OSDMap *o, OSDMap *n)
     n->osd_uuid = o->osd_uuid;
 }
 
+void OSDMap::remove_redundant_temporaries(CephContext *cct, const OSDMap& osdmap,
+					  OSDMap::Incremental *pending_inc)
+{
+  ldout(cct, 10) << "remove_redundant_temporaries" << dendl;
+  map<pg_t,vector<int> >::const_iterator pgi = osdmap.pg_temp->begin();
+  map<pg_t,int>::const_iterator primaryi = osdmap.primary_temp->begin();
+  while (pgi != osdmap.pg_temp->end()) {
+    pg_t checking = MIN(pgi->first, primaryi->first);
+    /**
+     *  we can clear the entry iff:
+     *  1) The entry actually corresponds to the pg we're looking at
+     *  2) we don't have a different temp entry in the pending_inc
+     */
+    bool can_clear_pg = (pgi->first == checking) &&
+                        (pending_inc->new_pg_temp.count(pgi->first) == 0);
+    bool can_clear_primary = (primaryi->first == checking) &&
+        (pending_inc->new_primary_temp.count(primaryi->first) == 0);
+
+    // if allowed to clear, get mapping and see if we can clear
+    if (can_clear_pg || can_clear_primary) {
+      vector<int> raw_up;
+      int primary;
+      osdmap.pg_to_raw_up(pgi->first, &raw_up, &primary);
+      if (can_clear_pg && raw_up == pgi->second) {
+	ldout(cct, 10) << " removing unnecessary pg_temp "
+	         << pgi->first << " -> " << pgi->second << dendl;
+	pending_inc->new_pg_temp[pgi->first].clear();
+      }
+      if (can_clear_primary && primary == primaryi->second) {
+        ldout(cct, 10) << " removing unnecessary primary_temp "
+                  << primaryi->first << " -> " << primaryi->second << dendl;
+        pending_inc->new_primary_temp[primaryi->first] = -1;
+      }
+    }
+
+    // increment the iterator farthest back, or both if equal
+    if (pgi->first < primaryi->first)
+      ++pgi;
+    else if (primaryi->first < pgi->first)
+      ++primaryi;
+    else {
+      ++pgi;
+      ++primaryi;
+    }
+  }
+  ++pgi;
+}
+
+void OSDMap::remove_down_pg_temp(CephContext *cct,
+				 const OSDMap& osdmap, Incremental *pending_inc)
+{
+  ldout(cct, 10) << "remove_down_pg_temp" << dendl;
+  OSDMap tmpmap(osdmap);
+  tmpmap.apply_incremental(*pending_inc);
+
+  for (map<pg_t,vector<int> >::iterator p = tmpmap.pg_temp->begin();
+       p != tmpmap.pg_temp->end();
+       ++p) {
+    unsigned num_up = 0;
+    for (vector<int>::iterator i = p->second.begin();
+	 i != p->second.end();
+	 ++i) {
+      if (!tmpmap.is_down(*i))
+	++num_up;
+    }
+    if (num_up == 0)
+      pending_inc->new_pg_temp[p->first].clear();
+  }
+}
+
+void OSDMap::remove_down_primary_temp(CephContext *cct,
+				      const OSDMap& osdmap, Incremental *pending_inc)
+{
+  ldout(cct, 10) << "remove_down_primary_temp" << dendl;
+  OSDMap tmpmap(osdmap);
+  tmpmap.apply_incremental(*pending_inc);
+
+  for (map<pg_t,int>::iterator p = tmpmap.primary_temp->begin();
+      p != tmpmap.primary_temp->end();
+      ++p) {
+    if (tmpmap.is_down(p->second))
+      pending_inc->new_primary_temp[p->first] = -1;
+  }
+}
+
 int OSDMap::apply_incremental(const Incremental &inc)
 {
   new_blacklist_entries = false;

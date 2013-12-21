@@ -455,6 +455,13 @@ private:
   /// try to re-use/reference addrs in oldmap from newmap
   static void dedup(const OSDMap *oldmap, OSDMap *newmap);
 
+  static void remove_redundant_temporaries(CephContext *cct, const OSDMap& osdmap,
+					   Incremental *pending_inc);
+  static void remove_down_pg_temp(CephContext *cct, const OSDMap& osdmap,
+				  Incremental *pending_inc);
+  static void remove_down_primary_temp(CephContext *cct, const OSDMap& osdmap,
+				       Incremental *pending_inc);
+
   // serialize, unserialize
 private:
   void encode_client_old(bufferlist& bl) const;
