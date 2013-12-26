@@ -120,9 +120,6 @@ TYPE(MonCap)
 TYPE(DBObjectMap::_Header)
 TYPE(DBObjectMap::State)
 
-#include "mds/Anchor.h"
-TYPE(Anchor)
-
 #include "mds/snap.h"
 TYPE(SnapInfo)
 TYPE(snaplink_t)
@@ -153,9 +150,6 @@ TYPE_FEATUREFUL(MDSMap::mds_info_t)
 
 #include "mds/Capability.h"
 TYPE_NOCOPY(Capability)
-
-#include "mds/AnchorServer.h"
-TYPE(AnchorServer)
 
 #include "mds/SessionMap.h"
 TYPE(SessionMap)

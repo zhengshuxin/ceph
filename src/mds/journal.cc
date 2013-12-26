@@ -271,9 +271,6 @@ void LogSegment::try_to_expire(MDS *mds, C_GatherBuilder &gather_bld)
     (*p)->add_waiter(CInode::WAIT_TRUNC, gather_bld.new_sub());
   }
   
-  // FIXME client requests...?
-  // audit handling of anchor transactions?
-
   if (gather_bld.has_subs()) {
     dout(6) << "LogSegment(" << offset << ").try_to_expire waiting" << dendl;
     mds->mdlog->flush();
@@ -378,11 +375,6 @@ void EMetaBlob::add_dir_context(CDir *dir, int mode)
 
 void EMetaBlob::update_segment(LogSegment *ls)
 {
-  // atids?
-  //for (list<version_t>::iterator p = atids.begin(); p != atids.end(); ++p)
-  //  ls->pending_commit_atids[*p] = ls;
-  // -> handled directly by AnchorClient
-
   // dirty inode mtimes
   // -> handled directly by Server.cc, replay()
 
@@ -1077,8 +1069,6 @@ void EMetaBlob::replay(MDS *mds, LogSegment *logseg, MDSlaveUpdate *slaveup)
 	  unlinked[in] = in->get_parent_dir();
 	  in->get_parent_dir()->unlink_inode(in->get_parent_dn());
 	}
-	if (in->get_parent_dn() && in->inode.anchored != p->inode.anchored)
-	  in->get_parent_dn()->adjust_nested_anchors( (int)p->inode.anchored - (int)in->inode.anchored );
 	p->update_inode(mds, in);
 	if (p->is_dirty()) in->_mark_dirty(logseg);
 	if (dn->get_linkage()->get_inode() != in) {

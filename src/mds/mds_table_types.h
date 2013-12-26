@@ -24,7 +24,7 @@ enum {
 
 inline const char *get_mdstable_name(int t) {
   switch (t) {
-  case TABLE_ANCHOR: return "anchortable";
+  case TABLE_ANCHOR: return "anchortable"; // unused
   case TABLE_SNAP: return "snaptable";
   default: assert(0);
   }

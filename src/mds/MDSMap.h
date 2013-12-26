@@ -146,7 +146,7 @@ protected:
                                   // at least this osdmap to ensure the blacklist propagates.
   utime_t created, modified;
 
-  int32_t tableserver;   // which MDS has anchortable, snaptable
+  int32_t tableserver;   // which MDS has snaptable
   int32_t root;          // which MDS has root directory
 
   __u32 session_timeout;
