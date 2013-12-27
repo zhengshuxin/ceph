@@ -1022,11 +1022,15 @@ void ReplicatedPG::do_op(OpRequestRef op)
   }
 
   // order this op as a write?
-  bool write_ordered = op->may_write() || (m->get_flags() & CEPH_OSD_FLAG_RWORDERED);
+  bool write_ordered =
+    op->may_write() ||
+    op->may_cache() ||
+    (m->get_flags() & CEPH_OSD_FLAG_RWORDERED);
 
   dout(10) << "do_op " << *m
 	   << (op->may_write() ? " may_write" : "")
 	   << (op->may_read() ? " may_read" : "")
+	   << (op->may_cache() ? " may_cache" : "")
 	   << " -> " << (write_ordered ? "write-ordered" : "read-ordered")
 	   << " flags " << ceph_osd_flag_string(m->get_flags())
 	   << dendl;
@@ -1077,7 +1081,7 @@ void ReplicatedPG::do_op(OpRequestRef op)
   }
 
   ObjectContextRef obc;
-  bool can_create = op->may_write();
+  bool can_create = op->may_write() | op->may_cache();
   hobject_t missing_oid;
   hobject_t oid(m->get_oid(),
 		m->get_object_locator().key,
@@ -1292,8 +1296,8 @@ void ReplicatedPG::do_op(OpRequestRef op)
     osd->reply_op_error(op, -ENFILE);
     return;
   }
-  if (!op->may_write() && (!obc->obs.exists ||
-                           obc->obs.oi.is_whiteout())) {
+  if (!op->may_write() && !op->may_cache() && (!obc->obs.exists ||
+					       obc->obs.oi.is_whiteout())) {
     close_op_ctx(ctx);
     osd->reply_op_error(op, -ENOENT);
     return;
@@ -1456,8 +1460,8 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   ctx->op_t = ObjectStore::Transaction();
   ctx->local_t = ObjectStore::Transaction();
 
-  // dup/replay?
-  if (op->may_write()) {
+  if (op->may_write() || op->may_cache()) {
+    // dup/replay?
     const pg_log_entry_t *entry = pg_log.get_log().get_request(ctx->reqid);
     if (entry) {
       const eversion_t& oldv = entry->version;
@@ -1612,7 +1616,7 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
 
   ctx->reply->set_reply_versions(ctx->at_version, ctx->user_at_version);
 
-  assert(op->may_write());
+  assert(op->may_write() || op->may_cache());
 
   // trim log?
   calc_trim_to();
@@ -1697,7 +1701,7 @@ void ReplicatedPG::log_op_stats(OpContext *ctx)
     osd->logger->inc(l_osd_op_r);
     osd->logger->inc(l_osd_op_r_outb, outb);
     osd->logger->tinc(l_osd_op_r_lat, latency);
-  } else if (op->may_write()) {
+  } else if (op->may_write() || op->may_cache()) {
     osd->logger->inc(l_osd_op_w);
     osd->logger->inc(l_osd_op_w_inb, inb);
     osd->logger->tinc(l_osd_op_w_rlat, rlatency);
