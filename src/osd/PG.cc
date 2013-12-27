@@ -2485,7 +2485,7 @@ void PG::update_snap_map(
 	    i->soid,
 	    _snaps,
 	    &_t);
-	} else {
+	} else if (i->is_modify()) {
 	  assert(i->is_modify());
 	  int r = snap_mapper.update_snaps(
 	    i->soid,
@@ -2493,6 +2493,8 @@ void PG::update_snap_map(
 	    0,
 	    &_t);
 	  assert(r == 0);
+	} else {
+	  assert(i->is_clean());
 	}
       }
     }
