@@ -25,6 +25,12 @@ v0.74
   pool default crush rule' takes precedence for backward compatibility
   and a deprecation warning is displayed when it is used.
 
+- The MDS requires a new OSD operation TMAP2OMAP, added in this release.  When
+  upgrading, be sure to upgrade and restart the ceph-osd daemons before the
+  ceph-mds daemon.  The MDS will refuse to start if any up OSDs do not support
+  the new feature.
+
+
 v0.72.2
 ~~~~~~~
 - As part of fix for #6796, 'ceph osd pool set <pool> <var> <arg>' now
