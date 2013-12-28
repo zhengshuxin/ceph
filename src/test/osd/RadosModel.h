@@ -1839,7 +1839,7 @@ public:
 class CacheEvictOp : public TestOp {
 public:
   librados::AioCompletion *completion;
-  librados::ObjectWriteOperation op;
+  librados::ObjectReadOperation op;
   string oid;
 
   CacheEvictOp(int n,
@@ -1866,7 +1866,8 @@ public:
 
     op.cache_evict();
     int r = context->io_ctx.aio_operate(context->prefix+oid, completion,
-					&op, librados::OPERATION_IGNORE_CACHE);
+					&op, librados::OPERATION_IGNORE_CACHE,
+					NULL);
     assert(!r);
   }
 
