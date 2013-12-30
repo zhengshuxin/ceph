@@ -2686,6 +2686,7 @@ void object_copy_data_t::encode(bufferlist& bl) const
   ::encode(cursor, bl);
   ::encode(omap_header, bl);
   ::encode(snaps, bl);
+  ::encode(snap_seq, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -2701,8 +2702,13 @@ void object_copy_data_t::decode(bufferlist::iterator& bl)
   ::decode(cursor, bl);
   if (struct_v >= 2)
     ::decode(omap_header, bl);
-  if (struct_v >= 3)
+  if (struct_v >= 3) {
     ::decode(snaps, bl);
+    ::decode(snap_seq, bl);
+  } else {
+    snaps.clear();
+    snap_seq = 0;
+  }
   DECODE_FINISH(bl);
 }
 
