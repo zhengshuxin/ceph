@@ -5379,10 +5379,15 @@ int ReplicatedPG::try_flush_mark_clean(FlushOpRef fop)
   if (!fop->blocking) {
     // non-blocking: try to take the lock manually, since we don't
     // have a ctx yet.
-    dout(20) << __func__ << " taking write lock" << dendl;
-    if (!obc->get_write(fop->ctx->op)) {
-      dout(10) << __func__ << " waiting on lock" << dendl;
+    if (obc->get_write(fop->ctx->op)) {
+      dout(20) << __func__ << " took write lock" << dendl;
+    } else if (fop->ctx->op) {
+      dout(10) << __func__ << " waiting on write lock" << dendl;
       return -EINPROGRESS;    // will retry.   this ctx is still alive!
+    } else {
+      dout(10) << __func__ << " failed write lock, no op; failing" << dendl;
+      cancel_flush(fop, false);
+      return -ECANCELED;
     }
   } else {
     dout(20) << __func__ << " already holding write lock: "
@@ -8298,6 +8303,7 @@ void ReplicatedPG::on_activate()
   }
 
   hit_set_setup();
+  agent_setup();
 }
 
 void ReplicatedPG::on_change(ObjectStore::Transaction *t)
@@ -8375,6 +8381,7 @@ void ReplicatedPG::on_pool_change()
 {
   dout(10) << __func__ << dendl;
   hit_set_setup();
+  agent_setup();
 }
 
 // clear state.  called on recovery completion AND cancellation.
@@ -9588,6 +9595,189 @@ void ReplicatedPG::hit_set_trim(RepGather *repop, unsigned max)
     repop->ctx->delta_stats.num_bytes -= st.st_size;
   }
 }
+
+
+// =======================================
+// cache agent
+
+void ReplicatedPG::agent_setup()
+{
+  assert(is_locked());
+  if (!is_primary() ||
+      pool.info.cache_mode == pg_pool_t::CACHEMODE_NONE) {
+    agent_clear();
+    return;
+  }
+  if (!agent_state) {
+    dout(10) << __func__ << " allocated new state" << dendl;
+    agent_state.reset(new TierAgentState);
+  } else {
+    dout(10) << __func__ << " keeping existing state" << dendl;
+  }
+
+  agent_poke();
+}
+
+struct GC_Agent : public GenContext<ThreadPool::TPHandle&> {
+  ReplicatedPGRef pg;
+  GC_Agent(ReplicatedPG *p) : pg(p) {}
+  void finish(ThreadPool::TPHandle& tph) {
+    pg->agent_worker();
+  }
+};
+
+void ReplicatedPG::agent_poke()
+{
+  assert(is_locked());
+  agent_choose_mode();
+  if (!agent_state->is_idle()) {
+    dout(20) << __func__ << " not idle, queueing" << dendl;
+    osd->agent_wq.queue(new GC_Agent(this));
+  }
+}
+
+void ReplicatedPG::agent_worker()
+{
+  lock();
+  if (!agent_state) {
+    dout(10) << __func__ << " no agent state, stopping" << dendl;
+    unlock();
+    return;
+  }
+
+  if (agent_state->is_idle()) {
+    dout(10) << __func__ << " idle, stopping" << dendl;
+    unlock();
+    return;
+  }
+  dout(10) << __func__ << " flush " << agent_state->get_flush_mode_name()
+	   << " evict " << agent_state->get_evict_mode_name() << dendl;
+
+  osr->flush();  // FIXME
+
+  int min = 1, max = 10;  // FIXME
+  while (true) {
+    // list some objects.  this conveniently lists clones (oldest to
+    // newest) before heads... the same order we want to flush in.
+    vector<hobject_t> ls;
+    hobject_t next;
+    int r = pgbackend->objects_list_partial(agent_state->position, min, max,
+					    0 /* no filtering by snapid */,
+					    &ls, &next);
+    assert(r >= 0);
+    dout(20) << " got " << ls.size() << " objects" << dendl;
+    for (vector<hobject_t>::iterator p = ls.begin();
+	 p != ls.end();
+	 ++p) {
+      ObjectContextRef obc = get_object_context(*p, false, NULL);
+      assert(obc);
+      if (agent_state->flush_mode != TierAgentState::FLUSH_MODE_IDLE)
+	agent_maybe_flush(obc);
+      if (agent_state->evict_mode != TierAgentState::EVICT_MODE_IDLE)
+	agent_maybe_evict(obc);
+    }
+  }
+
+  unlock();
+}
+
+void ReplicatedPG::agent_maybe_flush(ObjectContextRef& obc)
+{
+  dout(20) << __func__ << " " << obc << " " << obc->obs.oi << dendl;
+  if (!obc->obs.oi.is_dirty())
+    return;
+
+  utime_t now = ceph_clock_now(NULL);
+  if (obc->obs.oi.mtime + utime_t(pool.info.cache_min_flush_age, 0) > now) {
+    dout(20) << __func__ << " too young, skipping" << dendl;
+    return;
+  }
+
+  // FIXME: flush anything dirty, regardless of what distribution of
+  // ages we expect.
+
+  vector<OSDOp> ops;
+  tid_t rep_tid = osd->get_tid();
+  osd_reqid_t reqid(osd->get_cluster_msgr_name(), 0, rep_tid);
+  OpContext *ctx = new OpContext(OpRequestRef(), reqid, ops,
+				 &obc->obs, obc->ssc, this);
+  ctx->mtime = ceph_clock_now(cct);
+  ctx->at_version = get_next_version();
+
+  start_flush(ctx, false);
+}
+
+void ReplicatedPG::agent_maybe_evict(ObjectContextRef& obc)
+{
+  dout(20) << __func__ << " " << obc << " " << obc->obs.oi << dendl;
+#warning write me
+}
+
+bool ReplicatedPG::agent_choose_mode()
+{
+  TierAgentState::flush_mode_t flush_mode = TierAgentState::FLUSH_MODE_IDLE;
+  TierAgentState::evict_mode_t evict_mode = TierAgentState::EVICT_MODE_IDLE;
+  if (pool.info.target_max_bytes) {
+    uint64_t avg_size = info.stats.stats.sum.num_bytes /
+      info.stats.stats.sum.num_objects;
+
+    // flush mode
+    uint64_t dirty_bytes_micro =
+      info.stats.stats.sum.num_objects_dirty * avg_size * 1000000 /
+      pool.info.target_max_bytes;
+    if (dirty_bytes_micro > pool.info.cache_target_dirty_ratio_micro)
+      flush_mode = TierAgentState::FLUSH_MODE_ACTIVE;
+
+    // evict mode
+    uint64_t full_micro =
+      info.stats.stats.sum.num_bytes * 1000000 /
+      pool.info.target_max_bytes;
+    if (full_micro > 1000000)
+      evict_mode = TierAgentState::EVICT_MODE_FULL;
+    else if (full_micro > pool.info.cache_target_full_ratio_micro)
+      evict_mode = TierAgentState::EVICT_MODE_SOME;
+  }
+  if (pool.info.target_max_objects) {
+    // flush mode
+    uint64_t dirty_objects_micro =
+      info.stats.stats.sum.num_objects_dirty * 1000000 /
+      pool.info.target_max_objects;
+    if (dirty_objects_micro > pool.info.cache_target_dirty_ratio_micro)
+      flush_mode = TierAgentState::FLUSH_MODE_ACTIVE;
+
+    // evict mode
+    uint64_t full_micro =
+      info.stats.stats.sum.num_objects * 1000000 /
+      pool.info.target_max_objects;
+    if (full_micro > 1000000)
+      evict_mode = TierAgentState::EVICT_MODE_FULL;
+    else if (full_micro > pool.info.cache_target_full_ratio_micro &&
+	     evict_mode != TierAgentState::EVICT_MODE_FULL)
+      evict_mode = TierAgentState::EVICT_MODE_SOME;
+  }
+
+  bool changed = false;
+  if (flush_mode != agent_state->flush_mode) {
+    dout(5) << __func__ << " flush_mode "
+	    << TierAgentState::get_flush_mode_name(agent_state->flush_mode)
+	    << " -> "
+	    << TierAgentState::get_flush_mode_name(flush_mode)
+	    << dendl;
+    agent_state->flush_mode = flush_mode;
+    changed = true;
+  }
+  if (evict_mode != agent_state->evict_mode) {
+    dout(5) << __func__ << " evict_mode "
+	    << TierAgentState::get_evict_mode_name(agent_state->evict_mode)
+	    << " -> "
+	    << TierAgentState::get_evict_mode_name(evict_mode)
+	    << dendl;
+    agent_state->evict_mode = evict_mode;
+    changed = true;
+  }
+  return changed;
+}
+
 
 
 // ==========================================================================================
