@@ -104,6 +104,15 @@ static CompatSet get_fs_supported_compat_set() {
 }
 
 
+int FileStore::peek_journal_fsid(uuid_d *fsid)
+{
+  // make sure we don't try to use aio or direct_io (and get annoying
+  // error messages from failing to do so); performance implications
+  // should be irrelevant for this use
+  FileJournal j(*fsid, 0, 0, journalpath.c_str(), false, false);
+  return j.peek_fsid(*fsid);
+}
+
 void FileStore::FSPerfTracker::update_from_perfcounters(
   PerfCounters &logger)
 {
@@ -382,6 +391,7 @@ int FileStore::lfn_unlink(coll_t cid, const ghobject_t& o,
 }
 
 FileStore::FileStore(const std::string &base, const std::string &jdev, const char *name, bool do_update) :
+  JournalingObjectStore(base),
   internal_name(name),
   basedir(base), journalpath(jdev),
   blk_size(0),
@@ -1399,6 +1409,7 @@ int FileStore::mount()
     }
   }
 
+  wbthrottle.start();
   sync_thread.create();
 
   ret = journal_replay(initial_op_seq);
@@ -1415,6 +1426,8 @@ int FileStore::mount()
     sync_cond.Signal();
     lock.Unlock();
     sync_thread.join();
+
+    wbthrottle.stop();
 
     goto close_current_fd;
   }
@@ -1465,6 +1478,7 @@ int FileStore::umount()
   sync_cond.Signal();
   lock.Unlock();
   sync_thread.join();
+  wbthrottle.stop();
   op_tp.stop();
 
   journal_stop();
@@ -1570,7 +1584,7 @@ void FileStore::queue_op(OpSequencer *osr, Op *o)
   op_wq.queue(osr);
 }
 
-void FileStore::op_queue_reserve_throttle(Op *o)
+void FileStore::op_queue_reserve_throttle(Op *o, ThreadPool::TPHandle *handle)
 {
   // Do not call while holding the journal lock!
   uint64_t max_ops = m_filestore_queue_max_ops;
@@ -1592,7 +1606,11 @@ void FileStore::op_queue_reserve_throttle(Op *o)
 	      && (op_queue_bytes + o->bytes) > max_bytes)) {
       dout(2) << "waiting " << op_queue_len + 1 << " > " << max_ops << " ops || "
 	      << op_queue_bytes + o->bytes << " > " << max_bytes << dendl;
+      if (handle)
+	handle->suspend_tp_timeout();
       op_throttle_cond.Wait(op_throttle_lock);
+      if (handle)
+	handle->reset_tp_timeout();
     }
 
     op_queue_len++;
@@ -1677,7 +1695,8 @@ struct C_JournaledAhead : public Context {
 };
 
 int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
-				  TrackedOpRef osd_op)
+				  TrackedOpRef osd_op,
+				  ThreadPool::TPHandle *handle)
 {
   Context *onreadable;
   Context *ondisk;
@@ -1705,7 +1724,7 @@ int FileStore::queue_transactions(Sequencer *posr, list<Transaction*> &tls,
 
   if (journal && journal->is_writeable() && !m_filestore_journal_trailing) {
     Op *o = build_op(tls, onreadable, onreadable_sync, osd_op);
-    op_queue_reserve_throttle(o);
+    op_queue_reserve_throttle(o, handle);
     journal->throttle();
     uint64_t op_num = submit_manager.op_submit_start();
     o->op = op_num;
@@ -3136,6 +3155,7 @@ void FileStore::sync_entry()
       goto again;
     }
   }
+  stop = false;
   lock.Unlock();
 }
 

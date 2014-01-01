@@ -400,6 +400,14 @@ int librados::IoCtxImpl::list(Objecter::ListContext *context, int max_entries)
   return r;
 }
 
+uint32_t librados::IoCtxImpl::list_seek(Objecter::ListContext *context,
+					uint32_t pos)
+{
+  Mutex::Locker l(*lock);
+  context->list.clear();
+  return objecter->list_objects_seek(context, pos);
+}
+
 int librados::IoCtxImpl::create(const object_t& oid, bool exclusive)
 {
   ::ObjectOperation op;
@@ -520,10 +528,11 @@ int librados::IoCtxImpl::operate(const object_t& oid, ::ObjectOperation *o,
 
   int op = o->ops[0].op.op;
   ldout(client->cct, 10) << ceph_osd_op_name(op) << " oid=" << oid << " nspace=" << oloc.nspace << dendl;
+  Objecter::Op *objecter_op = objecter->prepare_mutate_op(oid, oloc,
+	                                                  *o, snapc, ut, 0,
+	                                                  NULL, oncommit, &ver);
   lock->Lock();
-  objecter->mutate(oid, oloc,
-	           *o, snapc, ut, 0,
-	           NULL, oncommit, &ver);
+  objecter->op_submit(objecter_op);
   lock->Unlock();
 
   mylock.Lock();
@@ -554,10 +563,11 @@ int librados::IoCtxImpl::operate_read(const object_t& oid,
 
   int op = o->ops[0].op.op;
   ldout(client->cct, 10) << ceph_osd_op_name(op) << " oid=" << oid << " nspace=" << oloc.nspace << dendl;
+  Objecter::Op *objecter_op = objecter->prepare_read_op(oid, oloc,
+	                                      *o, snap_seq, pbl, 0,
+	                                      onack, &ver);
   lock->Lock();
-  objecter->read(oid, oloc,
-	           *o, snap_seq, pbl, 0,
-	           onack, &ver);
+  objecter->op_submit(objecter_op);
   lock->Unlock();
 
   mylock.Lock();
@@ -582,18 +592,18 @@ int librados::IoCtxImpl::aio_operate_read(const object_t &oid,
 
   c->is_read = true;
   c->io = this;
-  c->pbl = pbl;
 
-  Mutex::Locker l(*lock);
-  objecter->read(oid, oloc,
+  Objecter::Op *objecter_op = objecter->prepare_read_op(oid, oloc,
 		 *o, snap_seq, pbl, flags,
 		 onack, &c->objver);
+  Mutex::Locker l(*lock);
+  objecter->op_submit(objecter_op);
   return 0;
 }
 
 int librados::IoCtxImpl::aio_operate(const object_t& oid,
 				     ::ObjectOperation *o, AioCompletionImpl *c,
-				     const SnapContext& snap_context)
+				     const SnapContext& snap_context, int flags)
 {
   utime_t ut = ceph_clock_now(client->cct);
   /* can't write to a snapshot */
@@ -607,7 +617,7 @@ int librados::IoCtxImpl::aio_operate(const object_t& oid,
   queue_aio_write(c);
 
   Mutex::Locker l(*lock);
-  objecter->mutate(oid, oloc, *o, snap_context, ut, 0, onack, oncommit,
+  objecter->mutate(oid, oloc, *o, snap_context, ut, flags, onack, oncommit,
 		   &c->objver);
 
   return 0;
@@ -624,11 +634,10 @@ int librados::IoCtxImpl::aio_read(const object_t oid, AioCompletionImpl *c,
 
   c->is_read = true;
   c->io = this;
-  c->pbl = pbl;
 
   Mutex::Locker l(*lock);
   objecter->read(oid, oloc,
-		 off, len, snapid, &c->bl, 0,
+		 off, len, snapid, pbl, 0,
 		 onack, &c->objver);
   return 0;
 }
@@ -644,8 +653,9 @@ int librados::IoCtxImpl::aio_read(const object_t oid, AioCompletionImpl *c,
 
   c->is_read = true;
   c->io = this;
-  c->buf = buf;
   c->maxlen = len;
+  c->bl.clear();
+  c->bl.push_back(buffer::create_static(len, buf));
 
   Mutex::Locker l(*lock);
   objecter->read(oid, oloc,
@@ -680,7 +690,6 @@ int librados::IoCtxImpl::aio_sparse_read(const object_t oid,
 
   c->is_read = true;
   c->io = this;
-  c->pbl = NULL;
 
   onack->m_ops.sparse_read(off, len, m, data_bl, NULL);
 
@@ -1222,13 +1231,8 @@ void librados::IoCtxImpl::C_aio_Ack::finish(int r)
     c->safe = true;
   c->cond.Signal();
 
-  if (c->buf && c->bl.length() > 0) {
-    unsigned l = MIN(c->bl.length(), c->maxlen);
-    c->bl.copy(0, l, c->buf);
+  if (c->bl.length() > 0) {
     c->rval = c->bl.length();
-  }
-  if (c->pbl) {
-    *c->pbl = c->bl;
   }
 
   if (c->callback_complete) {

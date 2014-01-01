@@ -571,7 +571,7 @@ struct ObjectOperation {
     utime_t *out_mtime;
     string *out_category;
     std::map<std::string,bufferlist> *out_attrs;
-    bufferlist *out_data;
+    bufferlist *out_data, *out_omap_header;
     std::map<std::string,bufferlist> *out_omap;
     int *prval;
     C_ObjectOperation_copyget(object_copy_cursor_t *c,
@@ -579,12 +579,13 @@ struct ObjectOperation {
 			      utime_t *m,
 			      string *cat,
 			      std::map<std::string,bufferlist> *a,
-			      bufferlist *d,
+			      bufferlist *d, bufferlist *oh,
 			      std::map<std::string,bufferlist> *o,
 			      int *r)
       : cursor(c),
 	out_size(s), out_mtime(m), out_category(cat),
-	out_attrs(a), out_data(d), out_omap(o), prval(r) {}
+	out_attrs(a), out_data(d), out_omap_header(oh),
+	out_omap(o), prval(r) {}
     void finish(int r) {
       if (r < 0)
 	return;
@@ -602,6 +603,8 @@ struct ObjectOperation {
 	  *out_attrs = copy_reply.attrs;
 	if (out_data)
 	  out_data->claim_append(copy_reply.data);
+	if (out_omap_header)
+	  out_omap_header->claim_append(copy_reply.omap_header);
 	if (out_omap)
 	  *out_omap = copy_reply.omap;
 	*cursor = copy_reply.cursor;
@@ -619,6 +622,7 @@ struct ObjectOperation {
 		string *out_category,
 		std::map<std::string,bufferlist> *out_attrs,
 		bufferlist *out_data,
+		bufferlist *out_omap_header,
 		std::map<std::string,bufferlist> *out_omap,
 		int *prval) {
     OSDOp& osd_op = add_op(CEPH_OSD_OP_COPY_GET);
@@ -629,7 +633,8 @@ struct ObjectOperation {
     out_rval[p] = prval;
     C_ObjectOperation_copyget *h =
       new C_ObjectOperation_copyget(cursor, out_size, out_mtime, out_category,
-                                    out_attrs, out_data, out_omap, prval);
+                                    out_attrs, out_data, out_omap_header,
+				    out_omap, prval);
     out_bl[p] = &h->bl;
     out_handler[p] = h;
   }
@@ -860,12 +865,55 @@ struct ObjectOperation {
     osd_op.op.snap.snapid = snapid;
   }
 
-  void copy_from(object_t src, snapid_t snapid, object_locator_t src_oloc, version_t src_version) {
+  void copy_from(object_t src, snapid_t snapid, object_locator_t src_oloc,
+		 version_t src_version, unsigned flags) {
     OSDOp& osd_op = add_op(CEPH_OSD_OP_COPY_FROM);
     osd_op.op.copy_from.snapid = snapid;
     osd_op.op.copy_from.src_version = src_version;
+    osd_op.op.copy_from.flags = flags;
     ::encode(src, osd_op.indata);
     ::encode(src_oloc, osd_op.indata);
+  }
+
+  /**
+   * writeback content to backing tier
+   *
+   * If object is marked dirty in the cache tier, write back content
+   * to backing tier. If the object is clean this is a no-op.
+   *
+   * If writeback races with an update, the update will block.
+   *
+   * use with IGNORE_CACHE to avoid triggering promote.
+   */
+  void cache_flush() {
+    add_op(CEPH_OSD_OP_CACHE_FLUSH);
+  }
+
+  /**
+   * writeback content to backing tier
+   *
+   * If object is marked dirty in the cache tier, write back content
+   * to backing tier. If the object is clean this is a no-op.
+   *
+   * If writeback races with an update, return EAGAIN.  Requires that
+   * the SKIPRWLOCKS flag be set.
+   *
+   * use with IGNORE_CACHE to avoid triggering promote.
+   */
+  void cache_try_flush() {
+    add_op(CEPH_OSD_OP_CACHE_TRY_FLUSH);
+  }
+
+  /**
+   * evict object from cache tier
+   *
+   * If object is marked clean, remove the object from the cache tier.
+   * Otherwise, return EBUSY.
+   *
+   * use with IGNORE_CACHE to avoid triggering promote.
+   */
+  void cache_evict() {
+    add_op(CEPH_OSD_OP_CACHE_EVICT);
   }
 };
 
@@ -873,12 +921,19 @@ struct ObjectOperation {
 // ----------------
 
 
-class Objecter {
- public:  
+class Objecter : public md_config_obs_t {
+public:
+  // config observer bits
+  virtual const char** get_tracked_conf_keys() const;
+  virtual void handle_conf_change(const struct md_config_t *conf,
+				  const std::set <std::string> &changed);
+
+public:
   Messenger *messenger;
   MonClient *monc;
   OSDMap    *osdmap;
   CephContext *cct;
+  std::multimap<string,string> crush_location;
 
   bool initialized;
  
@@ -891,7 +946,6 @@ class Objecter {
   int global_op_flags; // flags which are applied to each IO op
   bool keep_balanced_budget;
   bool honor_osdmap_full;
-  bool honor_cache_redirects;
 
   void maybe_request_map();
 
@@ -1319,6 +1373,7 @@ public:
     RECALC_OP_TARGET_OSD_DNE,
     RECALC_OP_TARGET_OSD_DOWN,
   };
+  bool op_should_be_paused(Op *op);
   int recalc_op_target(Op *op);
   bool recalc_linger_op_target(LingerOp *op);
 
@@ -1382,7 +1437,6 @@ public:
     num_unacked(0), num_uncommitted(0),
     global_op_flags(0),
     keep_balanced_budget(false), honor_osdmap_full(true),
-    honor_cache_redirects(true),
     last_seen_osdmap_version(0),
     last_seen_pgmap_version(0),
     client_lock(l), timer(t),
@@ -1416,10 +1470,8 @@ public:
   void set_honor_osdmap_full() { honor_osdmap_full = true; }
   void unset_honor_osdmap_full() { honor_osdmap_full = false; }
 
-  void set_honor_cache_redirects() { honor_cache_redirects = true; }
-  void unset_honor_cache_redirects() { honor_cache_redirects = false; }
-
-  void scan_requests(bool skipped_map,
+  void scan_requests(bool force_resend,
+		     bool force_resend_writes,
 		     map<tid_t, Op*>& need_resend,
 		     list<LingerOp*>& need_resend_linger,
 		     map<tid_t, CommandOp*>& need_resend_command);
@@ -1436,12 +1488,12 @@ public:
 
 private:
   // low-level
-  tid_t op_submit(Op *op);
   tid_t _op_submit(Op *op);
   inline void unregister_op(Op *op);
 
   // public interface
- public:
+public:
+  tid_t op_submit(Op *op);
   bool is_active() {
     return !(ops.empty() && linger_ops.empty() && poolstat_ops.empty() && statfs_ops.empty());
   }
@@ -1503,7 +1555,7 @@ private:
   }
 
   // mid-level helpers
-  tid_t mutate(const object_t& oid, const object_locator_t& oloc, 
+  Op *prepare_mutate_op(const object_t& oid, const object_locator_t& oloc, 
 	       ObjectOperation& op,
 	       const SnapContext& snapc, utime_t mtime, int flags,
 	       Context *onack, Context *oncommit, version_t *objver = NULL) {
@@ -1511,9 +1563,16 @@ private:
     o->priority = op.priority;
     o->mtime = mtime;
     o->snapc = snapc;
+    return o;
+  }
+  tid_t mutate(const object_t& oid, const object_locator_t& oloc, 
+	       ObjectOperation& op,
+	       const SnapContext& snapc, utime_t mtime, int flags,
+	       Context *onack, Context *oncommit, version_t *objver = NULL) {
+    Op *o = prepare_mutate_op(oid, oloc, op, snapc, mtime, flags, onack, oncommit, objver);
     return op_submit(o);
   }
-  tid_t read(const object_t& oid, const object_locator_t& oloc,
+  Op *prepare_read_op(const object_t& oid, const object_locator_t& oloc,
 	     ObjectOperation& op,
 	     snapid_t snapid, bufferlist *pbl, int flags,
 	     Context *onack, version_t *objver = NULL) {
@@ -1524,6 +1583,13 @@ private:
     o->out_bl.swap(op.out_bl);
     o->out_handler.swap(op.out_handler);
     o->out_rval.swap(op.out_rval);
+    return o;
+  }
+  tid_t read(const object_t& oid, const object_locator_t& oloc,
+	     ObjectOperation& op,
+	     snapid_t snapid, bufferlist *pbl, int flags,
+	     Context *onack, version_t *objver = NULL) {
+    Op *o = prepare_read_op(oid, oloc, op, snapid, pbl, flags, onack, objver);
     return op_submit(o);
   }
   tid_t pg_read(uint32_t hash, object_locator_t oloc,
@@ -1887,6 +1953,7 @@ private:
   }
 
   void list_objects(ListContext *p, Context *onfinish);
+  uint32_t list_objects_seek(ListContext *p, uint32_t pos);
 
   // -------------------------
   // pool ops

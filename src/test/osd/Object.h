@@ -263,11 +263,13 @@ public:
 
 class ObjectDesc {
 public:
-  ObjectDesc() : 
-    exists(false), version(0), layers() {}
-  ObjectDesc(ContentsGenerator *cont, const ContDesc &init) :
-    exists(false), version(0), layers() {
-    layers.push_front(make_pair(cont, init));
+  ObjectDesc()
+    : exists(false), dirty(false),
+      version(0), layers() {}
+  ObjectDesc(const ContDesc &init, ContentsGenerator *cont_gen)
+    : exists(false), dirty(false),
+      version(0), layers() {
+    layers.push_front(make_pair(cont_gen, init));
   }
 
   class iterator {
@@ -342,6 +344,7 @@ public:
   map<string, ContDesc> attrs; // Both omap and xattrs
   bufferlist header;
   bool exists;
+  bool dirty;
   uint64_t version;
 private:
   list<pair<std::tr1::shared_ptr<ContentsGenerator>, ContDesc> > layers;

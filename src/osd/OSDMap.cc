@@ -90,15 +90,17 @@ void osd_xinfo_t::dump(Formatter *f) const
   f->dump_stream("down_stamp") << down_stamp;
   f->dump_float("laggy_probability", laggy_probability);
   f->dump_int("laggy_interval", laggy_interval);
+  f->dump_int("features", features);
 }
 
 void osd_xinfo_t::encode(bufferlist& bl) const
 {
-  ENCODE_START(1, 1, bl);
+  ENCODE_START(2, 1, bl);
   ::encode(down_stamp, bl);
   __u32 lp = laggy_probability * 0xfffffffful;
   ::encode(lp, bl);
   ::encode(laggy_interval, bl);
+  ::encode(features, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -110,6 +112,10 @@ void osd_xinfo_t::decode(bufferlist::iterator& bl)
   ::decode(lp, bl);
   laggy_probability = (float)lp / (float)0xffffffff;
   ::decode(laggy_interval, bl);
+  if (struct_v >= 2)
+    ::decode(features, bl);
+  else
+    features = 0;
   DECODE_FINISH(bl);
 }
 
@@ -171,6 +177,46 @@ int OSDMap::Incremental::identify_osd(uuid_d u) const
       return p->first;
   return -1;
 }
+
+int OSDMap::Incremental::propagate_snaps_to_tiers(const OSDMap& osdmap)
+{
+  assert(epoch == osdmap.get_epoch() + 1);
+  for (map<int64_t,pg_pool_t>::iterator p = new_pools.begin();
+       p != new_pools.end(); ++p) {
+    if (!p->second.tiers.empty()) {
+      pg_pool_t& base = p->second;
+      for (set<uint64_t>::const_iterator q = base.tiers.begin();
+	   q != base.tiers.end();
+	   ++q) {
+	map<int64_t,pg_pool_t>::iterator r = new_pools.find(*q);
+	pg_pool_t *tier = 0;
+	if (r == new_pools.end()) {
+	  const pg_pool_t *orig = osdmap.get_pg_pool(*q);
+	  if (!orig)
+	    return -EIO;
+
+	  // skip update?
+	  if (orig->snap_seq == base.snap_seq &&
+	      orig->snap_epoch == base.snap_epoch)
+	    continue;
+
+	  tier = get_new_pool(*q, orig);
+	} else {
+	  tier = &r->second;
+	}
+	if (tier->tier_of != p->first)
+	  return -EIO;
+
+	tier->snap_seq = base.snap_seq;
+	tier->snap_epoch = base.snap_epoch;
+	tier->snaps = base.snaps;
+	tier->removed_snaps = base.removed_snaps;
+      }
+    }
+  }
+  return 0;
+}
+
 
 bool OSDMap::subtree_is_down(int id, set<int> *down_cache) const
 {
@@ -673,18 +719,26 @@ void OSDMap::get_all_osds(set<int32_t>& ls) const
       ls.insert(i);
 }
 
-int OSDMap::get_num_up_osds() const
+void OSDMap::get_up_osds(set<int32_t>& ls) const
 {
-  int n = 0;
+  for (int i = 0; i < max_osd; i++) {
+    if (is_up(i))
+      ls.insert(i);
+  }
+}
+
+unsigned OSDMap::get_num_up_osds() const
+{
+  unsigned n = 0;
   for (int i=0; i<max_osd; i++)
     if ((osd_state[i] & CEPH_OSD_EXISTS) &&
 	(osd_state[i] & CEPH_OSD_UP)) n++;
   return n;
 }
 
-int OSDMap::get_num_in_osds() const
+unsigned OSDMap::get_num_in_osds() const
 {
-  int n = 0;
+  unsigned n = 0;
   for (int i=0; i<max_osd; i++)
     if ((osd_state[i] & CEPH_OSD_EXISTS) &&
 	get_weight(i) != CEPH_OSD_OUT) n++;
@@ -744,25 +798,31 @@ bool OSDMap::find_osd_on_ip(const entity_addr_t& ip) const
 
 uint64_t OSDMap::get_features(uint64_t *pmask) const
 {
-  uint64_t features = 0;
-  uint64_t mask = 0;
+  uint64_t features = 0;  // things we actually have
+  uint64_t mask = 0;      // things we could have
 
   if (crush->has_nondefault_tunables())
     features |= CEPH_FEATURE_CRUSH_TUNABLES;
   if (crush->has_nondefault_tunables2())
     features |= CEPH_FEATURE_CRUSH_TUNABLES2;
+  if (crush->has_v2_rules())
+    features |= CEPH_FEATURE_CRUSH_V2;
   mask |= CEPH_FEATURES_CRUSH;
 
   for (map<int64_t,pg_pool_t>::const_iterator p = pools.begin(); p != pools.end(); ++p) {
     if (p->second.flags & pg_pool_t::FLAG_HASHPSPOOL) {
       features |= CEPH_FEATURE_OSDHASHPSPOOL;
     }
+    if (p->second.is_erasure()) {
+      features |= CEPH_FEATURE_OSD_ERASURE_CODES;
+    }
     if (!p->second.tiers.empty() ||
 	p->second.is_tier()) {
       features |= CEPH_FEATURE_OSD_CACHEPOOL;
     }
   }
-  mask |= CEPH_FEATURE_OSDHASHPSPOOL;
+  mask |= CEPH_FEATURE_OSDHASHPSPOOL | CEPH_FEATURE_OSD_CACHEPOOL |
+          CEPH_FEATURE_OSD_ERASURE_CODES;
 
   if (pmask)
     *pmask = mask;
@@ -1023,20 +1083,28 @@ ceph_object_layout OSDMap::make_object_layout(
   return ol;
 }
 
-void OSDMap::_remove_nonexistent_osds(vector<int>& osds) const
+void OSDMap::_remove_nonexistent_osds(const pg_pool_t& pool,
+				      vector<int>& osds) const
 {
-  unsigned removed = 0;
-  for (unsigned i = 0; i < osds.size(); i++) {
-    if (!exists(osds[i])) {
-      removed++;
-      continue;
+  if (pool.can_shift_osds()) {
+    unsigned removed = 0;
+    for (unsigned i = 0; i < osds.size(); i++) {
+      if (!exists(osds[i])) {
+	removed++;
+	continue;
+      }
+      if (removed) {
+	osds[i - removed] = osds[i];
+      }
     }
-    if (removed) {
-      osds[i - removed] = osds[i];
+    if (removed)
+      osds.resize(osds.size() - removed);
+  } else {
+    for (vector<int>::iterator p = osds.begin(); p != osds.end(); ++p) {
+      if (!exists(*p))
+	*p = CRUSH_ITEM_NONE;
     }
   }
-  if (removed)
-    osds.resize(osds.size() - removed);
 }
 
 int OSDMap::_pg_to_osds(const pg_pool_t& pool, pg_t pg, vector<int>& osds) const
@@ -1050,7 +1118,7 @@ int OSDMap::_pg_to_osds(const pg_pool_t& pool, pg_t pg, vector<int>& osds) const
   if (ruleno >= 0)
     crush->do_rule(ruleno, pps, osds, size, osd_weight);
 
-  _remove_nonexistent_osds(osds);
+  _remove_nonexistent_osds(pool, osds);
 
   return osds.size();
 }
@@ -1771,7 +1839,7 @@ bool OSDMap::crush_ruleset_in_use(int ruleset) const
   return false;
 }
 
-void OSDMap::build_simple(CephContext *cct, epoch_t e, uuid_d &fsid,
+int OSDMap::build_simple(CephContext *cct, epoch_t e, uuid_d &fsid,
 			  int nosd, int pg_bits, int pgp_bits)
 {
   ldout(cct, 10) << "build_simple on " << num_osd
@@ -1781,66 +1849,112 @@ void OSDMap::build_simple(CephContext *cct, epoch_t e, uuid_d &fsid,
   set_fsid(fsid);
   created = modified = ceph_clock_now(cct);
 
-  set_max_osd(nosd);
+  if (nosd >=  0) {
+    set_max_osd(nosd);
+  } else {
+    // count osds
+    int maxosd = 0, numosd = 0;
+    const md_config_t *conf = cct->_conf;
+    vector<string> sections;
+    conf->get_all_sections(sections);
+    for (vector<string>::iterator i = sections.begin(); i != sections.end(); ++i) {
+      if (i->find("osd.") != 0)
+	continue;
+
+      const char *begin = i->c_str() + 4;
+      char *end = (char*)begin;
+      int o = strtol(begin, &end, 10);
+      if (*end != '\0')
+	continue;
+
+      if (o > cct->_conf->mon_max_osd) {
+	lderr(cct) << "[osd." << o << "] in config has id > mon_max_osd " << cct->_conf->mon_max_osd << dendl;
+	return -ERANGE;
+      }
+      numosd++;
+      if (o > maxosd)
+	maxosd = o;
+    }
+
+    set_max_osd(maxosd + 1);
+  }
 
   // pgp_num <= pg_num
   if (pgp_bits > pg_bits)
     pgp_bits = pg_bits;
 
-  // crush map
-  map<int, const char*> rulesets;
-  rulesets[CEPH_DATA_RULE] = "data";
-  rulesets[CEPH_METADATA_RULE] = "metadata";
-  rulesets[CEPH_RBD_RULE] = "rbd";
+  vector<string> pool_names;
+  pool_names.push_back("data");
+  pool_names.push_back("metadata");
+  pool_names.push_back("rbd");
 
-  int poolbase = nosd ? nosd : 1;
+  int poolbase = get_max_osd() ? get_max_osd() : 1;
 
-  for (map<int,const char*>::iterator p = rulesets.begin(); p != rulesets.end(); ++p) {
+  for (vector<string>::iterator p = pool_names.begin();
+       p != pool_names.end(); ++p) {
     int64_t pool = ++pool_max;
-    pools[pool].type = pg_pool_t::TYPE_REP;
+    pools[pool].type = pg_pool_t::TYPE_REPLICATED;
     pools[pool].flags = cct->_conf->osd_pool_default_flags;
     if (cct->_conf->osd_pool_default_flag_hashpspool)
       pools[pool].flags |= pg_pool_t::FLAG_HASHPSPOOL;
     pools[pool].size = cct->_conf->osd_pool_default_size;
     pools[pool].min_size = cct->_conf->get_osd_pool_default_min_size();
-    pools[pool].crush_ruleset = p->first;
+    pools[pool].crush_ruleset =
+      CrushWrapper::get_osd_pool_default_crush_replicated_ruleset(cct);
     pools[pool].object_hash = CEPH_STR_HASH_RJENKINS;
     pools[pool].set_pg_num(poolbase << pg_bits);
     pools[pool].set_pgp_num(poolbase << pgp_bits);
     pools[pool].last_change = epoch;
-    if (p->first == CEPH_DATA_RULE)
+    if (*p == "data")
       pools[pool].crash_replay_interval = cct->_conf->osd_default_data_pool_replay_window;
-    pool_name[pool] = p->second;
-    name_pool[p->second] = pool;
+    pool_name[pool] = *p;
+    name_pool[*p] = pool;
   }
 
-  build_simple_crush_map(cct, *crush, rulesets, nosd);
+  stringstream ss;
+  int r;
+  if (nosd >= 0)
+    r = build_simple_crush_map(cct, *crush, nosd, &ss);
+  else
+    r = build_simple_crush_map_from_conf(cct, *crush, &ss);
 
-  for (int i=0; i<nosd; i++) {
+  if (r < 0)
+    lderr(cct) << ss.str() << dendl;
+  
+  for (int i=0; i<get_max_osd(); i++) {
     set_state(i, 0);
     set_weight(i, CEPH_OSD_OUT);
   }
+
+  return r;
 }
 
-
-void OSDMap::build_simple_crush_map(CephContext *cct, CrushWrapper& crush,
-				    map<int, const char*>& rulesets, int nosd)
+int OSDMap::_build_crush_types(CrushWrapper& crush)
 {
-  const md_config_t *conf = cct->_conf;
-
-  crush.create();
-
   crush.set_type_name(0, "osd");
   crush.set_type_name(1, "host");
-  crush.set_type_name(2, "rack");
-  crush.set_type_name(3, "row");
-  crush.set_type_name(4, "room");
-  crush.set_type_name(5, "datacenter");
-  crush.set_type_name(6, "root");
+  crush.set_type_name(2, "chassis");
+  crush.set_type_name(3, "rack");
+  crush.set_type_name(4, "row");
+  crush.set_type_name(5, "pdu");
+  crush.set_type_name(6, "pod");
+  crush.set_type_name(7, "room");
+  crush.set_type_name(8, "datacenter");
+  crush.set_type_name(9, "region");
+  crush.set_type_name(10, "root");
+  return 10;
+}
+
+int OSDMap::build_simple_crush_map(CephContext *cct, CrushWrapper& crush,
+				   int nosd, stringstream *ss)
+{
+  crush.create();
 
   // root
+  int root_type = _build_crush_types(crush);
   int rootid;
-  int r = crush.add_bucket(0, CRUSH_BUCKET_STRAW, CRUSH_HASH_DEFAULT, 6 /* pool */, 0, NULL, NULL, &rootid);
+  int r = crush.add_bucket(0, CRUSH_BUCKET_STRAW, CRUSH_HASH_DEFAULT,
+			   root_type, 0, NULL, NULL, &rootid);
   assert(r == 0);
   crush.set_item_name(rootid, "default");
 
@@ -1855,124 +1969,39 @@ void OSDMap::build_simple_crush_map(CephContext *cct, CrushWrapper& crush,
     crush.insert_item(cct, o, 1.0, name, loc);
   }
 
-  // rules
-  int minrep = conf->osd_min_rep;
-  int maxrep = conf->osd_max_rep;
-  assert(maxrep >= minrep);
-  for (map<int,const char*>::iterator p = rulesets.begin(); p != rulesets.end(); ++p) {
-    int ruleset = p->first;
-    crush_rule *rule = crush_make_rule(3, ruleset, pg_pool_t::TYPE_REP, minrep, maxrep);
-    assert(rule);
-    crush_rule_set_step(rule, 0, CRUSH_RULE_TAKE, rootid, 0);
-    crush_rule_set_step(rule, 1,
-			cct->_conf->osd_crush_chooseleaf_type ? CRUSH_RULE_CHOOSE_LEAF_FIRSTN : CRUSH_RULE_CHOOSE_FIRSTN,
-			CRUSH_CHOOSE_N,
-			cct->_conf->osd_crush_chooseleaf_type);
-    crush_rule_set_step(rule, 2, CRUSH_RULE_EMIT, 0, 0);
-    int rno = crush_add_rule(crush.crush, rule, -1);
-    crush.set_rule_name(rno, p->second);
-  }
+  string failure_domain =
+    crush.get_type_name(cct->_conf->osd_crush_chooseleaf_type);
+
+  r = crush.add_simple_ruleset("replicated_ruleset", "default", failure_domain,
+			       "firstn", pg_pool_t::TYPE_REPLICATED, ss);
+  if (r < 0)
+    return r;
+
+  r = crush.add_simple_ruleset("erasure_ruleset", "default", failure_domain,
+			       "indep", pg_pool_t::TYPE_ERASURE, ss);
+  if (r < 0)
+    return r;
 
   crush.finalize();
-}
-
-int OSDMap::build_simple_from_conf(CephContext *cct, epoch_t e, uuid_d &fsid,
-				   int pg_bits, int pgp_bits)
-{
-  ldout(cct, 10) << "build_simple_from_conf with "
-		 << pg_bits << " pg bits per osd, "
-		 << dendl;
-  epoch = e;
-  set_fsid(fsid);
-  created = modified = ceph_clock_now(cct);
-
-  const md_config_t *conf = cct->_conf;
-
-  // count osds
-  int maxosd = 0, numosd = 0;
-
-  vector<string> sections;
-  conf->get_all_sections(sections);
-  for (vector<string>::iterator i = sections.begin(); i != sections.end(); ++i) {
-    if (i->find("osd.") != 0)
-      continue;
-
-    const char *begin = i->c_str() + 4;
-    char *end = (char*)begin;
-    int o = strtol(begin, &end, 10);
-    if (*end != '\0')
-      continue;
-
-    if (o > cct->_conf->mon_max_osd) {
-      lderr(cct) << "[osd." << o << "] in config has id > mon_max_osd " << cct->_conf->mon_max_osd << dendl;
-      return -ERANGE;
-    }
-    numosd++;
-    if (o > maxosd)
-      maxosd = o;
-  }
-
-  set_max_osd(maxosd + 1);
-
-  // pgp_num <= pg_num
-  if (pgp_bits > pg_bits)
-    pgp_bits = pg_bits;
-
-  // crush map
-  map<int, const char*> rulesets;
-  rulesets[CEPH_DATA_RULE] = "data";
-  rulesets[CEPH_METADATA_RULE] = "metadata";
-  rulesets[CEPH_RBD_RULE] = "rbd";
-
-  for (map<int,const char*>::iterator p = rulesets.begin(); p != rulesets.end(); ++p) {
-    int64_t pool = ++pool_max;
-    pools[pool].type = pg_pool_t::TYPE_REP;
-    pools[pool].flags = cct->_conf->osd_pool_default_flags;
-    if (cct->_conf->osd_pool_default_flag_hashpspool)
-      pools[pool].flags |= pg_pool_t::FLAG_HASHPSPOOL;
-    pools[pool].size = cct->_conf->osd_pool_default_size;
-    pools[pool].min_size = cct->_conf->get_osd_pool_default_min_size();
-    pools[pool].crush_ruleset = p->first;
-    pools[pool].object_hash = CEPH_STR_HASH_RJENKINS;
-    pools[pool].set_pg_num((numosd + 1) << pg_bits);
-    pools[pool].set_pgp_num((numosd + 1) << pgp_bits);
-    pools[pool].last_change = epoch;
-    if (p->first == CEPH_DATA_RULE)
-      pools[pool].crash_replay_interval = cct->_conf->osd_default_data_pool_replay_window;
-    pool_name[pool] = p->second;
-    name_pool[p->second] = pool;
-  }
-
-  build_simple_crush_map_from_conf(cct, *crush, rulesets);
-
-  for (int i=0; i<=maxosd; i++) {
-    set_state(i, 0);
-    set_weight(i, CEPH_OSD_OUT);
-  }
 
   return 0;
 }
 
-void OSDMap::build_simple_crush_map_from_conf(CephContext *cct, CrushWrapper& crush,
-					      map<int, const char*>& rulesets)
+int OSDMap::build_simple_crush_map_from_conf(CephContext *cct,
+					     CrushWrapper& crush,
+					     stringstream *ss)
 {
   const md_config_t *conf = cct->_conf;
 
   crush.create();
 
-  crush.set_type_name(0, "osd");
-  crush.set_type_name(1, "host");
-  crush.set_type_name(2, "rack");
-  crush.set_type_name(3, "row");
-  crush.set_type_name(4, "room");
-  crush.set_type_name(5, "datacenter");
-  crush.set_type_name(6, "root");
-
   set<string> hosts, racks;
 
   // root
+  int root_type = _build_crush_types(crush);
   int rootid;
-  int r = crush.add_bucket(0, CRUSH_BUCKET_STRAW, CRUSH_HASH_DEFAULT, 6 /* pool */, 0, NULL, NULL, &rootid);
+  int r = crush.add_bucket(0, CRUSH_BUCKET_STRAW, CRUSH_HASH_DEFAULT,
+			   root_type, 0, NULL, NULL, &rootid);
   assert(r == 0);
   crush.set_item_name(rootid, "default");
 
@@ -2023,31 +2052,21 @@ void OSDMap::build_simple_crush_map_from_conf(CephContext *cct, CrushWrapper& cr
     crush.insert_item(cct, o, 1.0, *i, loc);
   }
 
-  // rules
-  int minrep = conf->osd_min_rep;
-  int maxrep = conf->osd_max_rep;
-  for (map<int,const char*>::iterator p = rulesets.begin(); p != rulesets.end(); ++p) {
-    int ruleset = p->first;
-    crush_rule *rule = crush_make_rule(3, ruleset, pg_pool_t::TYPE_REP, minrep, maxrep);
-    assert(rule);
-    crush_rule_set_step(rule, 0, CRUSH_RULE_TAKE, rootid, 0);
+  string failure_domain =
+    crush.get_type_name(cct->_conf->osd_crush_chooseleaf_type);
 
-    if (racks.size() > 3) {
-      // spread replicas across hosts
-      crush_rule_set_step(rule, 1, CRUSH_RULE_CHOOSE_LEAF_FIRSTN, CRUSH_CHOOSE_N, 2);
-    } else if (hosts.size() > 1) {
-      // spread replicas across hosts
-      crush_rule_set_step(rule, 1, CRUSH_RULE_CHOOSE_LEAF_FIRSTN, CRUSH_CHOOSE_N, 1);
-    } else {
-      // just spread across osds
-      crush_rule_set_step(rule, 1, CRUSH_RULE_CHOOSE_FIRSTN, CRUSH_CHOOSE_N, 0);
-    }
-    crush_rule_set_step(rule, 2, CRUSH_RULE_EMIT, 0, 0);
-    int rno = crush_add_rule(crush.crush, rule, -1);
-    crush.set_rule_name(rno, p->second);
-  }
+  r = crush.add_simple_ruleset("replicated_ruleset", "default", failure_domain,
+			       "firstn", pg_pool_t::TYPE_REPLICATED, ss);
+  if (r < 0)
+    return r;
+  r = crush.add_simple_ruleset("erasure_ruleset", "default", failure_domain,
+			       "indep", pg_pool_t::TYPE_ERASURE, ss);
+  if (r < 0)
+    return r;
 
   crush.finalize();
+
+  return 0;
 }
 
 
