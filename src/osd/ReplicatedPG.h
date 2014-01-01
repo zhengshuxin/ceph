@@ -514,7 +514,7 @@ public:
 
     tid_t rep_tid;
 
-    bool aborted, done;
+    bool rep_aborted, rep_done;
 
     bool all_applied;
     bool all_committed;
@@ -534,7 +534,7 @@ public:
       nref(1),
       ctx(c), obc(pi),
       rep_tid(rt), 
-      aborted(false), done(false),
+      rep_aborted(false), rep_done(false),
       all_applied(false), all_committed(false), sent_ack(false),
       //sent_nvram(false),
       sent_disk(false),

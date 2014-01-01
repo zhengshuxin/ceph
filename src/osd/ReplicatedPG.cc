@@ -5654,7 +5654,7 @@ void ReplicatedPG::repop_all_applied(RepGather *repop)
   dout(10) << __func__ << ": repop tid " << repop->rep_tid << " all applied "
 	   << dendl;
   repop->all_applied = true;
-  if (!repop->aborted) {
+  if (!repop->rep_aborted) {
     eval_repop(repop);
   }
 }
@@ -5676,7 +5676,7 @@ void ReplicatedPG::repop_all_committed(RepGather *repop)
 	   << dendl;
   repop->all_committed = true;
 
-  if (!repop->aborted) {
+  if (!repop->rep_aborted) {
     if (repop->v != eversion_t()) {
       last_update_ondisk = repop->v;
       last_complete_ondisk = repop->pg_local_last_complete;
@@ -5726,14 +5726,14 @@ void ReplicatedPG::eval_repop(RepGather *repop)
   if (m)
     dout(10) << "eval_repop " << *repop
 	     << " wants=" << (m->wants_ack() ? "a":"") << (m->wants_ondisk() ? "d":"")
-	     << (repop->done ? " DONE" : "")
+	     << (repop->rep_done ? " DONE" : "")
 	     << dendl;
   else
     dout(10) << "eval_repop " << *repop << " (no op)"
-	     << (repop->done ? " DONE" : "")
+	     << (repop->rep_done ? " DONE" : "")
 	     << dendl;
 
-  if (repop->done)
+  if (repop->rep_done)
     return;
 
   if (m) {
@@ -5832,7 +5832,7 @@ void ReplicatedPG::eval_repop(RepGather *repop)
 
   // done.
   if (repop->all_applied && repop->all_committed) {
-    repop->done = true;
+    repop->rep_done = true;
 
     calc_min_last_complete_ondisk();
 
@@ -8239,7 +8239,7 @@ void ReplicatedPG::apply_and_flush_repops(bool requeue)
     RepGather *repop = repop_queue.front();
     repop_queue.pop_front();
     dout(10) << " applying repop tid " << repop->rep_tid << dendl;
-    repop->aborted = true;
+    repop->rep_aborted = true;
 
     if (requeue) {
       if (repop->ctx->op) {
