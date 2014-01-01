@@ -5936,17 +5936,17 @@ void ReplicatedBackend::issue_op(
 {
   int acks_wanted = CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK;
 
-  if (ctx->op && parent->get_actingbackfill().size() > 1) {
+  if (parent->get_actingbackfill().size() > 1) {
     ostringstream ss;
     ss << "waiting for subops from " << 
       vector<int>(
-	parent->get_acting().begin() + 1,
-	parent->get_acting().end());
+	parent->get_actingbackfill().begin() + 1,
+	parent->get_actingbackfill().end());
     if (op->op)
       op->op->mark_sub_op_sent(ss.str());
   }
-  for (unsigned i=1; i<parent->get_acting().size(); i++) {
-    int peer = parent->get_acting()[i];
+  for (unsigned i=1; i<parent->get_actingbackfill().size(); i++) {
+    int peer = parent->get_actingbackfill()[i];
     const pg_info_t &pinfo = parent->get_peer_info().find(peer)->second;
 
     op->waiting_for_applied.insert(peer);
@@ -6597,7 +6597,7 @@ void ReplicatedBackend::sub_op_modify(OpRequestRef op)
   // we better not be missing this.
   assert(!parent->get_log().get_missing().is_missing(soid));
 
-  int ackerosd = *(parent->get_acting().begin());
+  int ackerosd = m->get_source().num();
   
   op->mark_started();
 
