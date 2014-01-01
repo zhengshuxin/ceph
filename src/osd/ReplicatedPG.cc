@@ -4277,9 +4277,7 @@ inline int ReplicatedPG::_delete_head(OpContext *ctx, bool no_whiteout)
     dout(20) << __func__ << " setting whiteout on " << soid << dendl;
     oi.set_flag(object_info_t::FLAG_WHITEOUT);
     ctx->delta_stats.num_whiteouts++;
-    t.truncate(coll, soid, 0);
-    t.omap_clear(coll, soid);
-    t.rmattrs(coll, soid);
+    t->touch(soid);
     return 0;
   }
 
@@ -5315,12 +5313,12 @@ void ReplicatedPG::finish_promote(int r, OpRequestRef op,
 
   if (whiteout) {
     // create a whiteout
-    tctx->op_t.touch(coll, soid);
+    tctx->op_t->touch(soid);
     tctx->new_obs.oi.set_flag(object_info_t::FLAG_WHITEOUT);
     ++tctx->delta_stats.num_whiteouts;
     dout(20) << __func__ << " creating whiteout" << dendl;
   } else {
-    tctx->op_t.swap(results->final_tx);
+    tctx->op_t->append(results->final_tx);
     if (results->started_temp_obj) {
       tctx->discard_temp_oid = temp_obj;
     }
