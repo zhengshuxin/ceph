@@ -1005,9 +1005,14 @@ bool PG::choose_acting(int& newest_update_osd)
     return false;
   }
 
-  // For now we only backfill 1 at a time as before
-  if (!backfill.empty())
-    backfill.resize(1);
+  // TODO: Add check of osdmap for all OSDs to be able to handle new acting
+  // Determine if compatibility needed
+  bool compat_mode = !cct->_conf->osd_debug_override_acting_compat;
+
+  // May not be necessary, but the old mechanism only did one at a time
+  if (compat_mode && !backfill.empty()) {
+      backfill.resize(1);
+  }
 
   // This might cause a problem if min_size is large
   // and we need to backfill more than 1 osd.  Older
@@ -1018,15 +1023,7 @@ bool PG::choose_acting(int& newest_update_osd)
     return false;
   }
 
-  // TODO: Add check of osdmap for all OSDs to be able to handle new acting
-  // Determine if compatibility needed
-  bool compat_mode = !cct->_conf->osd_debug_override_acting_compat;
-
   if (compat_mode) {
-    // May not be necessary, but the old mechanism only did one at a time
-    if (!backfill.empty())
-      backfill.resize(1);
-
     want.insert(want.end(), backfill.begin(), backfill.end());
   }
 
